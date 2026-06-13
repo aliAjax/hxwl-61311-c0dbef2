@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, Upload, FileText, X, AlertCircle, CheckCheck, LayoutGrid, List } from 'lucide-react';
+import { useMemo, useState, useCallback } from 'react';
+import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, Upload, FileText, X, AlertCircle, CheckCheck, LayoutGrid, List, ClipboardCopy } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -75,7 +75,7 @@ const appConfig = {
   "seed": [
     {
       "patient": "吴阿姨",
-      "date": "2026-06-13",
+      "date": "2026-06-14",
       "shift": "上午",
       "bed": "B03",
       "start": "08:00",
@@ -84,7 +84,7 @@ const appConfig = {
     },
     {
       "patient": "赵先生",
-      "date": "2026-06-13",
+      "date": "2026-06-14",
       "shift": "下午",
       "bed": "B03",
       "start": "12:30",
@@ -93,7 +93,7 @@ const appConfig = {
     },
     {
       "patient": "陈叔叔",
-      "date": "2026-06-13",
+      "date": "2026-06-14",
       "shift": "上午",
       "bed": "B01",
       "start": "08:30",
@@ -146,7 +146,12 @@ const appConfig = {
   }
 };
 
-const today = new Date().toISOString().slice(0, 10);
+function getLocalDateString() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+const today = getLocalDateString();
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
@@ -534,6 +539,55 @@ function App() {
       });
   }, [records, filters]);
 
+  const todayRecords = useMemo(() => records.filter((item) => item.date === today), [records]);
+
+  const handoverSummary = useMemo(() => {
+    const counts = {};
+    for (const status of appConfig.statuses) {
+      counts[status] = todayRecords.filter((item) => item.status === status).length;
+    }
+    const conflictRecords = todayRecords.filter((item) => item.conflict || hasOverlap(item, records));
+    counts['存在冲突'] = conflictRecords.length;
+
+    const focusRecords = todayRecords.filter((item) => {
+      if (item.conflict || hasOverlap(item, records)) return true;
+      if (item.status === '透析中') return true;
+      if (item.status === '清洁中') return true;
+      return false;
+    });
+
+    return { counts, conflictRecords, focusRecords };
+  }, [todayRecords, records]);
+
+  const [copied, setCopied] = useState(false);
+
+  const handleCopySummary = useCallback(() => {
+    const { counts, focusRecords } = handoverSummary;
+    const lines = [];
+    lines.push(`【今日交接摘要】 ${today}`);
+    lines.push('');
+    lines.push('— 床位状态汇总 —');
+    for (const status of appConfig.statuses) {
+      lines.push(`${status}：${counts[status]} 床`);
+    }
+    lines.push(`存在冲突：${counts['存在冲突']} 床`);
+    lines.push('');
+    if (focusRecords.length > 0) {
+      lines.push('— 需重点交接 —');
+      focusRecords.forEach((item, i) => {
+        const reason = (item.conflict || hasOverlap(item, records)) ? '冲突' : item.status;
+        lines.push(`${i + 1}. ${item.bed} · ${item.patient} · ${item.shift} ${item.start}-${item.end} · ${item.status}${(item.conflict || hasOverlap(item, records)) ? ' [冲突]' : ''}`);
+      });
+    } else {
+      lines.push('— 无需重点交接记录 —');
+    }
+    const text = lines.join('\n');
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }, [handoverSummary, records]);
+
   const metrics = [
     { label: "今日安排", value: records.filter((item) => item.date === today).length },
     { label: "透析中", value: records.filter((item) => item.status === '透析中').length },
@@ -602,6 +656,59 @@ function App() {
             <strong>{metric.value}</strong>
           </article>
         ))}
+      </section>
+
+      <section className="handover-section">
+        <div className="panel handover-panel">
+          <div className="handover-header">
+            <div className="panel-title">
+              <ClipboardCopy size={18} />
+              <h2>今日交接摘要</h2>
+            </div>
+            <button type="button" className={'copy-btn' + (copied ? ' copied' : '')} onClick={handleCopySummary}>
+              <ClipboardCopy size={15} />
+              {copied ? '已复制' : '复制摘要'}
+            </button>
+          </div>
+          <div className="handover-counts">
+            {appConfig.statuses.map((status) => (
+              <div className={'handover-count-item ' + statusClass(status)} key={status}>
+                <span className="handover-count-value">{handoverSummary.counts[status]}</span>
+                <span className="handover-count-label">{status}</span>
+              </div>
+            ))}
+            <div className="handover-count-item status-conflict">
+              <span className="handover-count-value">{handoverSummary.counts['存在冲突']}</span>
+              <span className="handover-count-label">存在冲突</span>
+            </div>
+          </div>
+          {handoverSummary.focusRecords.length > 0 && (
+            <div className="handover-focus">
+              <h4>需重点交接</h4>
+              <div className="handover-focus-list">
+                {handoverSummary.focusRecords.map((item) => {
+                  const isConflict = item.conflict || hasOverlap(item, records);
+                  return (
+                    <div className={'handover-focus-item' + (isConflict ? ' conflict' : '')} key={item.id} onClick={() => setSelected(item)}>
+                      <div className="handover-focus-main">
+                        <span className="handover-focus-bed">{item.bed}</span>
+                        <span className="handover-focus-patient">{item.patient}</span>
+                        <span className={'status ' + statusClass(item.status)}>{item.status}</span>
+                      </div>
+                      <div className="handover-focus-meta">
+                        <span>{item.shift} {item.start}-{item.end}</span>
+                        {isConflict && <span className="handover-conflict-tag"><AlertTriangle size={12} />冲突</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          {handoverSummary.focusRecords.length === 0 && (
+            <p className="empty">今日无重点交接事项。</p>
+          )}
+        </div>
       </section>
 
       <section className="workspace">
