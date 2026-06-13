@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, Upload, FileText, X, AlertCircle, CheckCheck } from 'lucide-react';
+import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, Upload, FileText, X, AlertCircle, CheckCheck, LayoutGrid, List } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -399,6 +399,7 @@ function App() {
   const [form, setForm] = useState(appConfig.defaultValues);
   const [filters, setFilters] = useState({ query: '', status: '全部' });
   const [selected, setSelected] = useState(null);
+  const [viewMode, setViewMode] = useState('list');
 
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState('');
@@ -547,6 +548,31 @@ function App() {
     }, {});
   }, [filteredRecords]);
 
+  const calendarDates = useMemo(() => {
+    const dates = new Set(filteredRecords.map((item) => item.date).filter(Boolean));
+    return Array.from(dates).sort();
+  }, [filteredRecords]);
+
+  const calendarBeds = useMemo(() => {
+    const bedField = appConfig.fields.find((f) => f.key === 'bed');
+    const configBeds = bedField?.options || [];
+    const recordBeds = filteredRecords.map((item) => item.bed).filter(Boolean);
+    return Array.from(new Set([...configBeds, ...recordBeds])).sort();
+  }, [filteredRecords]);
+
+  const calendarGrid = useMemo(() => {
+    const grid = {};
+    for (const date of calendarDates) {
+      grid[date] = {};
+      for (const bed of calendarBeds) {
+        grid[date][bed] = filteredRecords
+          .filter((item) => item.date === date && item.bed === bed)
+          .sort((a, b) => (a.start || '').localeCompare(b.start || ''));
+      }
+    }
+    return grid;
+  }, [filteredRecords, calendarDates, calendarBeds]);
+
   const directory = useMemo(() => {
     return records.reduce((acc, item) => {
       const key = item.issue || '未分类';
@@ -625,31 +651,97 @@ function App() {
               <option>全部</option>
               {appConfig.statuses.map((status) => <option key={status}>{status}</option>)}
             </select>
+            <div className="view-toggle">
+              <button type="button" className={'toggle-btn ' + (viewMode === 'list' ? 'active' : '')} onClick={() => setViewMode('list')} title="列表视图">
+                <List size={16} />
+              </button>
+              <button type="button" className={'toggle-btn ' + (viewMode === 'calendar' ? 'active' : '')} onClick={() => setViewMode('calendar')} title="日历视图">
+                <LayoutGrid size={16} />
+              </button>
+            </div>
           </div>
 
-          <div className="records">
-            {filteredRecords.map((item) => (
-              <article className={'record ' + (item.conflict || hasOverlap(item, records) ? 'conflict' : '')} key={item.id} onClick={() => setSelected(item)}>
-                <div className="record-head">
-                  <div>
-                    <h3>{`${item.bed} · ${item.patient}`}</h3>
-                    <p>{`${item.date} ${item.shift} · ${item.start}-${item.end}`}</p>
+          {viewMode === 'list' ? (
+            <div className="records">
+              {filteredRecords.map((item) => (
+                <article className={'record ' + (item.conflict || hasOverlap(item, records) ? 'conflict' : '')} key={item.id} onClick={() => setSelected(item)}>
+                  <div className="record-head">
+                    <div>
+                      <h3>{`${item.bed} · ${item.patient}`}</h3>
+                      <p>{`${item.date} ${item.shift} · ${item.start}-${item.end}`}</p>
+                    </div>
+                    <span className={'status ' + statusClass(item.status)}>{item.status}</span>
                   </div>
-                  <span className={'status ' + statusClass(item.status)}>{item.status}</span>
-                </div>
-                <p className="record-detail">{hasOverlap(item, records) ? '存在床位时间重叠，请调整安排' : '床位时间正常'}</p>
-                {(item.conflict || hasOverlap(item, records)) && <div className="warning"><AlertTriangle size={15} />发现冲突</div>}
-                <div className="actions" onClick={(event) => event.stopPropagation()}>
-                  {appConfig.statuses.map((status) => (
-                    <button key={status} type="button" onClick={() => updateStatus(item.id, status)}>{status}</button>
+                  <p className="record-detail">{hasOverlap(item, records) ? '存在床位时间重叠，请调整安排' : '床位时间正常'}</p>
+                  {(item.conflict || hasOverlap(item, records)) && <div className="warning"><AlertTriangle size={15} />发现冲突</div>}
+                  <div className="actions" onClick={(event) => event.stopPropagation()}>
+                    {appConfig.statuses.map((status) => (
+                      <button key={status} type="button" onClick={() => updateStatus(item.id, status)}>{status}</button>
+                    ))}
+                    {appConfig.action === 'copyRecipe' && <button type="button" onClick={() => duplicateRecord(item)}><RotateCcw size={14} />复制</button>}
+                    {appConfig.chart && <button type="button" onClick={() => addTemperature(item)}>加温度</button>}
+                    <button className="ghost-danger" type="button" onClick={() => removeRecord(item.id)}><Trash2 size={14} /></button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="calendar-wrap">
+              {calendarDates.length === 0 || calendarBeds.length === 0 ? (
+                <p className="empty">暂无排班数据</p>
+              ) : (
+                <div className="calendar-grid" style={{ gridTemplateColumns: `110px repeat(${calendarDates.length}, minmax(180px, 1fr))` }}>
+                  <div className="calendar-corner"></div>
+                  {calendarDates.map((date) => (
+                    <div className="calendar-col-header" key={date}>
+                      <strong>{date}</strong>
+                      <span>{new Date(date).toLocaleDateString('zh-CN', { weekday: 'short' })}</span>
+                    </div>
                   ))}
-                  {appConfig.action === 'copyRecipe' && <button type="button" onClick={() => duplicateRecord(item)}><RotateCcw size={14} />复制</button>}
-                  {appConfig.chart && <button type="button" onClick={() => addTemperature(item)}>加温度</button>}
-                  <button className="ghost-danger" type="button" onClick={() => removeRecord(item.id)}><Trash2 size={14} /></button>
+                  {calendarBeds.flatMap((bed) => {
+                    const rowHeader = (
+                      <div className="calendar-row-header" key={`row-${bed}`}>
+                        <Bed size={14} />
+                        <span>{bed}</span>
+                      </div>
+                    );
+                    const cells = calendarDates.map((date) => {
+                      const cellItems = calendarGrid[date]?.[bed] || [];
+                      return (
+                        <div className="calendar-cell" key={`${bed}-${date}`}>
+                          {cellItems.length === 0 ? (
+                            <span className="cell-empty">空闲</span>
+                          ) : (
+                            cellItems.map((item) => {
+                              const isConflict = item.conflict || hasOverlap(item, records);
+                              return (
+                                <div
+                                  key={item.id}
+                                  className={'cal-item ' + (isConflict ? 'conflict' : '')}
+                                  onClick={() => setSelected(item)}
+                                >
+                                  <div className="cal-item-head">
+                                    <span className="cal-patient">{item.patient}</span>
+                                    <span className={'status ' + statusClass(item.status)}>{item.status}</span>
+                                  </div>
+                                  <div className="cal-item-meta">
+                                    <span className="cal-shift">{item.shift}</span>
+                                    <span className="cal-time">{item.start}-{item.end}</span>
+                                  </div>
+                                  {isConflict && <div className="cal-warning"><AlertTriangle size={12} />冲突</div>}
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                      );
+                    });
+                    return [rowHeader, ...cells];
+                  })}
                 </div>
-              </article>
-            ))}
-          </div>
+              )}
+            </div>
+          )}
         </section>
       </section>
 
