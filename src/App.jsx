@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays } from 'lucide-react';
+import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, Upload, FileText, X, AlertCircle, CheckCheck } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -210,16 +210,251 @@ function statusClass(status) {
   return ['status-a', 'status-b', 'status-c', 'status-d'][index] || 'status-a';
 }
 
+const TIME_REGEX = /^([01]?[0-9]|2[0-3]):([0-5][0-9])$/;
+const DATE_REGEX = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/;
+
+const FIELD_ALIASES = {
+  patient: ['患者', '姓名', '病人', 'patient', 'name'],
+  date: ['日期', '透析日期', '排班日期', 'date'],
+  shift: ['班次', '时段', 'shift'],
+  bed: ['床位', '床位号', '床号', 'bed'],
+  start: ['开始时间', '开始', '预计开始', 'start'],
+  end: ['结束时间', '结束', '预计结束', 'end'],
+  status: ['状态', '当前状态', 'status']
+};
+
+function detectSeparator(line) {
+  const counts = {
+    ',': (line.match(/,/g) || []).length,
+    '\t': (line.match(/\t/g) || []).length,
+    '|': (line.match(/\|/g) || []).length,
+    ';': (line.match(/;/g) || []).length
+  };
+  let best = ',';
+  let max = -1;
+  for (const [sep, count] of Object.entries(counts)) {
+    if (count > max) {
+      max = count;
+      best = sep;
+    }
+  }
+  return max > 0 ? best : null;
+}
+
+function matchField(header) {
+  const h = String(header || '').trim().toLowerCase();
+  for (const [key, aliases] of Object.entries(FIELD_ALIASES)) {
+    if (aliases.some((a) => a.toLowerCase() === h || h.includes(a.toLowerCase()))) {
+      return key;
+    }
+  }
+  return null;
+}
+
+function normalizeDate(text) {
+  if (!text) return '';
+  const t = String(text).trim();
+  const m = t.match(DATE_REGEX);
+  if (m) {
+    const y = m[1];
+    const mo = String(m[2]).padStart(2, '0');
+    const d = String(m[3]).padStart(2, '0');
+    return `${y}-${mo}-${d}`;
+  }
+  return t;
+}
+
+function isValidTime(text) {
+  if (!text) return false;
+  return TIME_REGEX.test(String(text).trim());
+}
+
+function normalizeTime(text) {
+  if (!text) return '';
+  const t = String(text).trim();
+  const m = t.match(TIME_REGEX);
+  if (m) {
+    return `${String(m[1]).padStart(2, '0')}:${m[2]}`;
+  }
+  return t;
+}
+
+function parsePasteText(text) {
+  const rawLines = String(text || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (rawLines.length === 0) return [];
+
+  const sep = detectSeparator(rawLines[0]) || /\s{2,}/;
+  const splitLine = (line) => {
+    if (typeof sep === 'string') {
+      return line.split(sep).map((s) => s.trim());
+    }
+    return line.split(sep).map((s) => s.trim());
+  };
+
+  let headerMap = null;
+  let startIdx = 0;
+  const firstParts = splitLine(rawLines[0]);
+  const matchedCount = firstParts.filter((p) => matchField(p)).length;
+  if (matchedCount >= 3) {
+    headerMap = {};
+    firstParts.forEach((p, i) => {
+      const f = matchField(p);
+      if (f) headerMap[i] = f;
+    });
+    startIdx = 1;
+  }
+
+  const requiredKeys = ['patient', 'date', 'shift', 'bed', 'start', 'end'];
+  if (!headerMap) {
+    const n = firstParts.length;
+    headerMap = {};
+    for (let i = 0; i < n && i < requiredKeys.length; i++) {
+      headerMap[i] = requiredKeys[i];
+    }
+    if (n > requiredKeys.length) headerMap[requiredKeys.length] = 'status';
+    startIdx = 0;
+  }
+
+  const result = [];
+  for (let i = startIdx; i < rawLines.length; i++) {
+    const parts = splitLine(rawLines[i]);
+    if (parts.every((p) => !p)) continue;
+    const row = { patient: '', date: '', shift: '', bed: '', start: '', end: '', status: '' };
+    for (const [idx, key] of Object.entries(headerMap)) {
+      row[key] = parts[Number(idx)] || '';
+    }
+    row.lineNo = i + 1;
+    result.push(row);
+  }
+  return result;
+}
+
+function validateParsed(parsed, existingRecords) {
+  return parsed.map((row) => {
+    const errors = [];
+    const warnings = [];
+
+    if (!String(row.patient || '').trim()) errors.push('缺少患者');
+    if (!String(row.date || '').trim()) errors.push('缺少日期');
+    if (!String(row.shift || '').trim()) errors.push('缺少班次');
+    if (!String(row.bed || '').trim()) errors.push('缺少床位');
+    if (!String(row.start || '').trim()) errors.push('缺少开始时间');
+    if (!String(row.end || '').trim()) errors.push('缺少结束时间');
+
+    if (row.date && !DATE_REGEX.test(normalizeDate(row.date))) {
+      errors.push('日期格式错误');
+    }
+    if (row.start && !isValidTime(row.start)) {
+      errors.push('开始时间格式错误');
+    }
+    if (row.end && !isValidTime(row.end)) {
+      errors.push('结束时间格式错误');
+    }
+    if (row.start && row.end && isValidTime(row.start) && isValidTime(row.end) && !(normalizeTime(row.start) < normalizeTime(row.end))) {
+      errors.push('开始时间须早于结束时间');
+    }
+
+    const normalized = {
+      ...row,
+      date: normalizeDate(row.date),
+      start: normalizeTime(row.start),
+      end: normalizeTime(row.end),
+      status: row.status || appConfig.primaryStatus
+    };
+
+    if (errors.length === 0) {
+      const allForCheck = [...existingRecords, ...parsed.filter((r, i) => parsed.indexOf(row) > i).map((r) => ({ id: `_pre_${parsed.indexOf(r)}`, bed: normalizeDate(r.bed), date: normalizeDate(r.date), start: normalizeTime(r.start), end: normalizeTime(r.end) }))];
+      const tempTarget = { id: `_cur_${parsed.indexOf(row)}`, ...normalized };
+      const overlapExisting = existingRecords.some((item) =>
+        item.bed === normalized.bed &&
+        item.date === normalized.date &&
+        normalized.start < item.end &&
+        normalized.end > item.start
+      );
+      const overlapInBatch = parsed.some((other, idx) => {
+        if (other === row) return false;
+        const od = normalizeDate(other.date);
+        const os = normalizeTime(other.start);
+        const oe = normalizeTime(other.end);
+        const ob = String(other.bed || '').trim();
+        if (!ob || !od || !os || !oe) return false;
+        return ob === normalized.bed && od === normalized.date && normalized.start < oe && normalized.end > os;
+      });
+      if (overlapExisting || overlapInBatch) {
+        warnings.push('床位时间重叠');
+      }
+    }
+
+    return {
+      row: normalized,
+      errors,
+      warnings,
+      valid: errors.length === 0
+    };
+  });
+}
+
 function App() {
   const [records, setRecords] = useState(loadRecords);
   const [form, setForm] = useState(appConfig.defaultValues);
   const [filters, setFilters] = useState({ query: '', status: '全部' });
   const [selected, setSelected] = useState(null);
 
+  const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState('');
+  const [parsedPreview, setParsedPreview] = useState([]);
+
   function persist(next) {
     setRecords(next);
     localStorage.setItem(appConfig.storage, JSON.stringify(next));
   }
+
+  function handleImportOpen() {
+    setImportOpen(true);
+    setImportText('');
+    setParsedPreview([]);
+  }
+
+  function handleImportClose() {
+    setImportOpen(false);
+    setImportText('');
+    setParsedPreview([]);
+  }
+
+  function handleParse() {
+    const parsed = parsePasteText(importText);
+    const validated = validateParsed(parsed, records);
+    setParsedPreview(validated);
+  }
+
+  function handleConfirmImport() {
+    const validItems = parsedPreview.filter((p) => p.valid);
+    if (validItems.length === 0) return;
+    const newRecords = validItems.map((p) => ({
+      id: uid(),
+      patient: String(p.row.patient || '').trim(),
+      date: p.row.date,
+      shift: String(p.row.shift || '').trim(),
+      bed: String(p.row.bed || '').trim(),
+      start: p.row.start,
+      end: p.row.end,
+      status: appConfig.statuses.includes(p.row.status) ? p.row.status : appConfig.primaryStatus,
+      createdAt: new Date().toISOString(),
+      timeline: [{ status: appConfig.statuses.includes(p.row.status) ? p.row.status : appConfig.primaryStatus, at: today, by: '批量导入' }]
+    }));
+    persist([...newRecords, ...records]);
+    setImportOpen(false);
+    setImportText('');
+    setParsedPreview([]);
+  }
+
+  const importStats = useMemo(() => {
+    const total = parsedPreview.length;
+    const valid = parsedPreview.filter((p) => p.valid).length;
+    const withErrors = total - valid;
+    const withWarnings = parsedPreview.filter((p) => p.warnings.length > 0).length;
+    return { total, valid, withErrors, withWarnings };
+  }, [parsedPreview]);
 
   function addRecord(event) {
     event.preventDefault();
@@ -344,36 +579,41 @@ function App() {
       </section>
 
       <section className="workspace">
-        <form className="panel form-panel" onSubmit={addRecord}>
-          <div className="panel-title">
-            <ClipboardList size={18} />
-            <h2>新增记录</h2>
-          </div>
-          <div className="form-grid">
-            {appConfig.fields.map((field) => (
-              <label key={field.key} className={field.type === 'textarea' ? 'wide' : ''}>
-                <span>{field.label}</span>
-                {field.type === 'textarea' ? (
-                  <textarea value={form[field.key] || ''} onChange={(event) => setForm({ ...form, [field.key]: event.target.value })} placeholder={field.placeholder} />
-                ) : field.type === 'select' ? (
-                  <select value={form[field.key] || ''} onChange={(event) => setForm({ ...form, [field.key]: event.target.value })}>
-                    {field.options.map((option) => <option key={option}>{option}</option>)}
-                  </select>
-                ) : (
-                  <input type={field.type} value={form[field.key] || ''} onChange={(event) => setForm({ ...form, [field.key]: event.target.value })} placeholder={field.placeholder} />
-                )}
+        <div className="form-stack">
+          <form className="panel form-panel" onSubmit={addRecord}>
+            <div className="panel-title">
+              <ClipboardList size={18} />
+              <h2>新增记录</h2>
+            </div>
+            <div className="form-grid">
+              {appConfig.fields.map((field) => (
+                <label key={field.key} className={field.type === 'textarea' ? 'wide' : ''}>
+                  <span>{field.label}</span>
+                  {field.type === 'textarea' ? (
+                    <textarea value={form[field.key] || ''} onChange={(event) => setForm({ ...form, [field.key]: event.target.value })} placeholder={field.placeholder} />
+                  ) : field.type === 'select' ? (
+                    <select value={form[field.key] || ''} onChange={(event) => setForm({ ...form, [field.key]: event.target.value })}>
+                      {field.options.map((option) => <option key={option}>{option}</option>)}
+                    </select>
+                  ) : (
+                    <input type={field.type} value={form[field.key] || ''} onChange={(event) => setForm({ ...form, [field.key]: event.target.value })} placeholder={field.placeholder} />
+                  )}
+                </label>
+              ))}
+              <label>
+                <span>当前状态</span>
+                <select value={form.status || appConfig.primaryStatus} onChange={(event) => setForm({ ...form, status: event.target.value })}>
+                  {appConfig.statuses.map((status) => <option key={status}>{status}</option>)}
+                </select>
               </label>
-            ))}
-            <label>
-              <span>当前状态</span>
-              <select value={form.status || appConfig.primaryStatus} onChange={(event) => setForm({ ...form, status: event.target.value })}>
-                {appConfig.statuses.map((status) => <option key={status}>{status}</option>)}
-              </select>
-            </label>
-          </div>
-          <button className="primary" type="submit"><Plus size={18} />新增</button>
-          <p className="hint">{appConfig.note}</p>
-        </form>
+            </div>
+            <div className="form-actions">
+              <button className="primary" type="submit"><Plus size={18} />新增</button>
+              <button type="button" className="secondary" onClick={handleImportOpen}><Upload size={18} />批量导入</button>
+            </div>
+            <p className="hint">{appConfig.note}</p>
+          </form>
+        </div>
 
         <section className="panel list-panel">
           <div className="toolbar">
@@ -449,7 +689,7 @@ function App() {
             <div className="detail">
               <h3>{`${selected.bed} · ${selected.patient}`}</h3>
               <p>{`${selected.date} ${selected.shift} · ${selected.start}-${selected.end}`}</p>
-              <p>{hasOverlap(item, records) ? '存在床位时间重叠，请调整安排' : '床位时间正常'}</p>
+              <p>{hasOverlap(selected, records) ? '存在床位时间重叠，请调整安排' : '床位时间正常'}</p>
               {selected.temps && (
                 <div className="temp-chart">
                   {selected.temps.map((value, index) => <i key={index} style={{ height: Math.max(10, 56 + Number(value) * 8) }} title={String(value)} />)}
@@ -466,6 +706,86 @@ function App() {
           )}
         </aside>
       </section>
+
+      {importOpen && (
+        <div className="modal-overlay" onClick={handleImportClose}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="panel-title">
+                <FileText size={18} />
+                <h2>批量排班导入预览</h2>
+              </div>
+              <button type="button" className="icon-btn" onClick={handleImportClose}><X size={18} /></button>
+            </div>
+            <div className="modal-body">
+              <div className="import-hint">
+                <p>粘贴排班文本或 CSV 内容，支持逗号、Tab、竖线或空格分隔，可含表头。字段顺序：患者、日期、班次、床位、开始时间、结束时间、状态（可选）。</p>
+              </div>
+              <textarea
+                className="import-textarea"
+                value={importText}
+                onChange={(e) => setImportText(e.target.value)}
+                placeholder={'示例（可含表头）：\n患者,日期,班次,床位,开始时间,结束时间,状态\n王阿姨,2026-06-14,上午,B02,08:00,12:00,待到达\n李大爷,2026-06-14,下午,B04,13:00,17:00,待到达'}
+                rows={6}
+              />
+              <div className="import-actions">
+                <button type="button" className="secondary" onClick={handleParse} disabled={!importText.trim()}><CheckCheck size={16} />解析预览</button>
+                <span className="text-muted">
+                  {importStats.total > 0 && `共 ${importStats.total} 行 · 有效 ${importStats.valid} 行 · 错误 ${importStats.withErrors} 行`}
+                  {importStats.withWarnings > 0 && ` · 冲突警告 ${importStats.withWarnings} 行`}
+                </span>
+              </div>
+
+              {parsedPreview.length > 0 && (
+                <div className="preview-wrap">
+                  <div className="preview-table">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>行</th>
+                          <th>患者</th>
+                          <th>日期</th>
+                          <th>班次</th>
+                          <th>床位</th>
+                          <th>开始</th>
+                          <th>结束</th>
+                          <th>状态</th>
+                          <th>校验</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {parsedPreview.map((p, idx) => (
+                          <tr key={idx} className={!p.valid ? 'row-error' : (p.warnings.length > 0 ? 'row-warning' : 'row-ok')}>
+                            <td>{p.row.lineNo ?? idx + 1}</td>
+                            <td className={!String(p.row.patient || '').trim() ? 'cell-bad' : ''}>{p.row.patient || '-'}</td>
+                            <td className={!String(p.row.date || '').trim() || !DATE_REGEX.test(p.row.date) ? 'cell-bad' : ''}>{p.row.date || '-'}</td>
+                            <td className={!String(p.row.shift || '').trim() ? 'cell-bad' : ''}>{p.row.shift || '-'}</td>
+                            <td className={!String(p.row.bed || '').trim() ? 'cell-bad' : ''}>{p.row.bed || '-'}</td>
+                            <td className={!String(p.row.start || '').trim() || !isValidTime(p.row.start) ? 'cell-bad' : ''}>{p.row.start || '-'}</td>
+                            <td className={!String(p.row.end || '').trim() || !isValidTime(p.row.end) || (isValidTime(p.row.start) && isValidTime(p.row.end) && !(p.row.start < p.row.end)) ? 'cell-bad' : ''}>{p.row.end || '-'}</td>
+                            <td>{p.row.status || '-'}</td>
+                            <td className="validate-cell">
+                              {p.errors.map((e, i) => <span key={i} className="tag tag-error"><AlertCircle size={12} />{e}</span>)}
+                              {p.warnings.map((w, i) => <span key={i} className="tag tag-warn"><AlertTriangle size={12} />{w}</span>)}
+                              {p.valid && p.warnings.length === 0 && <span className="tag tag-ok"><CheckCircle2 size={12} />正常</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="secondary" onClick={handleImportClose}>取消</button>
+              <button type="button" className="primary" onClick={handleConfirmImport} disabled={importStats.valid === 0}>
+                <Plus size={16} />确认导入 {importStats.valid} 条
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
