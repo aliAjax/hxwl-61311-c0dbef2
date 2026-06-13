@@ -283,7 +283,7 @@ function parsePasteText(text) {
   const rawLines = String(text || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   if (rawLines.length === 0) return [];
 
-  const sep = detectSeparator(rawLines[0]) || /\s{2,}/;
+  const sep = detectSeparator(rawLines[0]) || /\s+/;
   const splitLine = (line) => {
     if (typeof sep === 'string') {
       return line.split(sep).map((s) => s.trim());
