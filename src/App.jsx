@@ -1,5 +1,5 @@
 import { useMemo, useState, useCallback } from 'react';
-import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, Upload, FileText, X, AlertCircle, CheckCheck, LayoutGrid, List, ClipboardCopy, Clock, GitBranch, User, Calendar, Filter, ArrowRightLeft, AlertOctagon, History } from 'lucide-react';
+import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, Upload, FileText, X, AlertCircle, CheckCheck, LayoutGrid, List, ClipboardCopy, Clock, GitBranch, User, Calendar, Filter, ArrowRightLeft, AlertOctagon, History, Sparkles, Wand2, Save, Edit2 } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -226,6 +226,183 @@ function priorityRank(value) {
 function hasOverlap(target, records) {
   if (!target.bed || !target.date || !target.start || !target.end) return false;
   return records.some((item) => item.id !== target.id && item.bed === target.bed && item.date === target.date && target.start < item.end && target.end > item.start);
+}
+
+function timeToMinutes(timeStr) {
+  if (!timeStr) return 0;
+  const [h, m] = timeStr.split(':').map(Number);
+  return h * 60 + m;
+}
+
+const SHIFT_TIME_RANGES = {
+  '上午': { start: '06:00', end: '12:00' },
+  '下午': { start: '12:00', end: '18:00' },
+  '夜间': { start: '18:00', end: '24:00' },
+  '全部': { start: '06:00', end: '24:00' }
+};
+
+function minutesToTime(minutes) {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+function getBedOccupancies(bed, date, records, excludeId) {
+  return records
+    .filter((item) => item.bed === bed && item.date === date && item.id !== excludeId)
+    .map((item) => ({ start: timeToMinutes(item.start), end: timeToMinutes(item.end), patient: item.patient, id: item.id }))
+    .sort((a, b) => a.start - b.start);
+}
+
+function findGapsOnBed(bed, date, records, durationMin, excludeId) {
+  const occupancies = getBedOccupancies(bed, date, records, excludeId);
+  const gaps = [];
+  const dayStart = timeToMinutes('06:00');
+  const dayEnd = timeToMinutes('24:00');
+
+  let cursor = dayStart;
+  for (const occ of occupancies) {
+    if (occ.start > cursor && occ.start - cursor >= durationMin) {
+      gaps.push({ start: cursor, end: occ.start });
+    }
+    cursor = Math.max(cursor, occ.end);
+  }
+  if (dayEnd > cursor && dayEnd - cursor >= durationMin) {
+    gaps.push({ start: cursor, end: dayEnd });
+  }
+  return gaps;
+}
+
+const RECOMMEND_TYPES = {
+  SAME_SHIFT_FREE_BED: 'same_shift_free_bed',
+  TIME_SLOT_FREE_BED: 'time_slot_free_bed',
+  ADJUST_START_TIME: 'adjust_start_time',
+  ADJACENT_SHIFT_BED: 'adjacent_shift_bed'
+};
+
+function generateBedRecommendations(target, records) {
+  if (!target.date || !target.start || !target.end || !target.shift) return [];
+
+  const allBeds = [];
+  const bedField = appConfig.fields.find((f) => f.key === 'bed');
+  if (bedField?.options) allBeds.push(...bedField.options);
+  records.forEach((r) => { if (r.bed && !allBeds.includes(r.bed)) allBeds.push(r.bed); });
+
+  const durationMin = timeToMinutes(target.end) - timeToMinutes(target.start);
+  if (durationMin <= 0) return [];
+
+  const targetStart = timeToMinutes(target.start);
+  const targetEnd = timeToMinutes(target.end);
+  const shiftRange = SHIFT_TIME_RANGES[target.shift];
+  const shiftStart = timeToMinutes(shiftRange.start);
+  const shiftEnd = timeToMinutes(shiftRange.end);
+
+  const recs = [];
+
+  for (const bed of allBeds) {
+    const sameDateRecords = records.filter((r) => r.date === target.date && r.bed === bed && r.id !== target.id);
+    const sameShiftRecords = sameDateRecords.filter((r) => r.shift === target.shift);
+
+    if (sameShiftRecords.length === 0) {
+      const bedOccupied = sameDateRecords.some((r) =>
+        target.start < r.end && target.end > r.start
+      );
+      if (!bedOccupied) {
+        recs.push({
+          type: RECOMMEND_TYPES.SAME_SHIFT_FREE_BED,
+          bed,
+          start: target.start,
+          end: target.end,
+          shift: target.shift,
+          reason: `同日期同班次「${target.shift}」空闲，时间段 ${target.start}-${target.end} 完全可用`,
+          score: 100
+        });
+      }
+    }
+
+    const hasOverlapOnBed = sameDateRecords.some((r) =>
+      target.start < r.end && target.end > r.start
+    );
+    if (!hasOverlapOnBed && !recs.find((r) => r.type === RECOMMEND_TYPES.SAME_SHIFT_FREE_BED && r.bed === bed)) {
+      recs.push({
+        type: RECOMMEND_TYPES.TIME_SLOT_FREE_BED,
+        bed,
+        start: target.start,
+        end: target.end,
+        shift: target.shift,
+        reason: `${target.date} 时间段 ${target.start}-${target.end} 不重叠，床位 ${bed} 可用`,
+        score: 85
+      });
+    }
+
+    const gaps = findGapsOnBed(bed, target.date, records, durationMin, target.id);
+    for (const gap of gaps) {
+      const gapWithinShift = gap.start >= shiftStart && gap.end <= shiftEnd;
+      const adjustedStart = Math.max(gap.start, targetStart);
+      const adjustedEnd = adjustedStart + durationMin;
+      if (adjustedEnd <= gap.end && adjustedEnd <= shiftEnd) {
+        const startDiff = adjustedStart - targetStart;
+        if (startDiff > 0 && startDiff <= 120) {
+          recs.push({
+            type: RECOMMEND_TYPES.ADJUST_START_TIME,
+            bed,
+            start: minutesToTime(adjustedStart),
+            end: minutesToTime(adjustedEnd),
+            shift: target.shift,
+            reason: `${bed} 只需将开始时间从 ${target.start} 调整至 ${minutesToTime(adjustedStart)}（延后 ${startDiff} 分钟），即可避开冲突`,
+            score: 70 - startDiff
+          });
+        } else if (startDiff < 0 && Math.abs(startDiff) <= 60) {
+          recs.push({
+            type: RECOMMEND_TYPES.ADJUST_START_TIME,
+            bed,
+            start: minutesToTime(adjustedStart),
+            end: minutesToTime(adjustedEnd),
+            shift: target.shift,
+            reason: `${bed} 只需将开始时间从 ${target.start} 调整至 ${minutesToTime(adjustedStart)}（提前 ${Math.abs(startDiff)} 分钟），即可避开冲突`,
+            score: 70 - Math.abs(startDiff)
+          });
+        }
+      }
+    }
+  }
+
+  for (const bed of allBeds) {
+    for (const otherShift of ['上午', '下午', '夜间']) {
+      if (otherShift === target.shift) continue;
+      const otherRange = SHIFT_TIME_RANGES[otherShift];
+      const otherStart = timeToMinutes(otherRange.start);
+      const otherEnd = timeToMinutes(otherRange.end);
+      if (otherEnd - otherStart < durationMin) continue;
+
+      const sameBedShiftRecords = records.filter(
+        (r) => r.date === target.date && r.bed === bed && r.shift === otherShift && r.id !== target.id
+      );
+      const suggestedStart = Math.max(otherStart, targetStart);
+      const suggestedEnd = suggestedStart + durationMin;
+      if (suggestedEnd <= otherEnd) {
+        const hasConflict = sameBedShiftRecords.some(
+          (r) => minutesToTime(suggestedStart) < r.end && minutesToTime(suggestedEnd) > r.start
+        );
+        if (!hasConflict) {
+          recs.push({
+            type: RECOMMEND_TYPES.ADJACENT_SHIFT_BED,
+            bed,
+            start: minutesToTime(suggestedStart),
+            end: minutesToTime(suggestedEnd),
+            shift: otherShift,
+            reason: `${bed} 可调整至「${otherShift}」班次，时间段 ${minutesToTime(suggestedStart)}-${minutesToTime(suggestedEnd)} 空闲`,
+            score: 55
+          });
+        }
+      }
+    }
+  }
+
+  return recs
+    .filter((r) => r.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 6);
 }
 
 function statusClass(status) {
@@ -527,6 +704,7 @@ function App() {
   const [selected, setSelected] = useState(null);
   const [viewMode, setViewMode] = useState('list');
   const [timelineShift, setTimelineShift] = useState('全部');
+  const [editing, setEditing] = useState(null);
 
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState('');
@@ -596,30 +774,85 @@ function App() {
 
   function addRecord(event) {
     event.preventDefault();
-    const nextRecord = {
-      id: uid(),
-      ...form,
-      status: form.status || appConfig.primaryStatus,
-      createdAt: new Date().toISOString(),
-      timeline: [{ status: form.status || appConfig.primaryStatus, at: today, by: '录入' }]
-    };
+    if (editing) {
+      const updated = records.map((item) => item.id === editing.id ? {
+        ...item,
+        ...form,
+        status: form.status || item.status,
+        timeline: [...(item.timeline || []), { status: form.status || item.status, at: today, by: '编辑' }]
+      } : item);
+      persist(updated);
+      const edited = updated.find((r) => r.id === editing.id);
+      setSelected(edited);
+      setEditing(null);
+      setForm(appConfig.defaultValues);
+    } else {
+      const nextRecord = {
+        id: uid(),
+        ...form,
+        status: form.status || appConfig.primaryStatus,
+        createdAt: new Date().toISOString(),
+        timeline: [{ status: form.status || appConfig.primaryStatus, at: today, by: '录入' }]
+      };
 
-    if (appConfig.conflict === 'date-slot' && records.some((item) => item.date === nextRecord.date && item.slot === nextRecord.slot)) {
-      nextRecord.conflict = true;
-    }
-    if (appConfig.conflict === 'bed-time' && hasOverlap(nextRecord, records)) {
-      nextRecord.conflict = true;
-    }
-    if (appConfig.chart) {
-      const temp = Number(nextRecord.temperature || 0);
-      nextRecord.temps = [temp];
-      if (temp > 2) nextRecord.status = '异常';
-    }
+      if (appConfig.conflict === 'date-slot' && records.some((item) => item.date === nextRecord.date && item.slot === nextRecord.slot)) {
+        nextRecord.conflict = true;
+      }
+      if (appConfig.conflict === 'bed-time' && hasOverlap(nextRecord, records)) {
+        nextRecord.conflict = true;
+      }
+      if (appConfig.chart) {
+        const temp = Number(nextRecord.temperature || 0);
+        nextRecord.temps = [temp];
+        if (temp > 2) nextRecord.status = '异常';
+      }
 
-    persist([nextRecord, ...records]);
-    setForm(appConfig.defaultValues);
-    setSelected(nextRecord);
+      persist([nextRecord, ...records]);
+      setForm(appConfig.defaultValues);
+      setSelected(nextRecord);
+    }
   }
+
+  function startEdit(item) {
+    setEditing(item);
+    setForm({
+      patient: item.patient,
+      date: item.date,
+      shift: item.shift,
+      bed: item.bed,
+      start: item.start,
+      end: item.end,
+      status: item.status
+    });
+    setSelected(null);
+  }
+
+  function cancelEdit() {
+    setEditing(null);
+    setForm(appConfig.defaultValues);
+  }
+
+  function applyRecommendation(rec) {
+    setForm({
+      ...form,
+      bed: rec.bed,
+      shift: rec.shift,
+      start: rec.start,
+      end: rec.end
+    });
+  }
+
+  const formHasConflict = useMemo(() => {
+    if (!form.bed || !form.date || !form.start || !form.end) return false;
+    const target = editing ? { ...form, id: editing.id } : { ...form, id: '_new_' };
+    return hasOverlap(target, records);
+  }, [form, records, editing]);
+
+  const smartRecommendations = useMemo(() => {
+    if (!formHasConflict) return [];
+    const target = editing ? { ...form, id: editing.id } : { ...form, id: '_new_' };
+    return generateBedRecommendations(target, records);
+  }, [form, records, editing, formHasConflict]);
 
   function updateStatus(id, status) {
     const next = records.map((item) => item.id === id ? {
@@ -790,19 +1023,6 @@ function App() {
     }
     return grid;
   }, [filteredRecords, calendarDates, calendarBeds]);
-
-  const SHIFT_TIME_RANGES = {
-    '上午': { start: '06:00', end: '12:00' },
-    '下午': { start: '12:00', end: '18:00' },
-    '夜间': { start: '18:00', end: '24:00' },
-    '全部': { start: '06:00', end: '24:00' }
-  };
-
-  function timeToMinutes(timeStr) {
-    if (!timeStr) return 0;
-    const [h, m] = timeStr.split(':').map(Number);
-    return h * 60 + m;
-  }
 
   function overlapsTimelineRange(item, range) {
     if (!item.start || !item.end) return false;
@@ -1033,8 +1253,7 @@ function App() {
         <div className="form-stack">
           <form className="panel form-panel" onSubmit={addRecord}>
             <div className="panel-title">
-              <ClipboardList size={18} />
-              <h2>新增记录</h2>
+              {editing ? <><Edit2 size={18} /><h2>编辑排班</h2></> : <><ClipboardList size={18} /><h2>新增记录</h2></>}
             </div>
             <div className="form-grid">
               {appConfig.fields.map((field) => (
@@ -1059,10 +1278,59 @@ function App() {
               </label>
             </div>
             <div className="form-actions">
-              <button className="primary" type="submit"><Plus size={18} />新增</button>
-              <button type="button" className="secondary" onClick={handleImportOpen}><Upload size={18} />批量导入</button>
+              <button className="primary" type="submit">{editing ? <><Save size={18} />保存</> : <><Plus size={18} />新增</>}</button>
+              {editing ? (
+                <button type="button" className="secondary" onClick={cancelEdit}><X size={18} />取消编辑</button>
+              ) : (
+                <button type="button" className="secondary" onClick={handleImportOpen}><Upload size={18} />批量导入</button>
+              )}
             </div>
             <p className="hint">{appConfig.note}</p>
+
+            {formHasConflict && (
+              <div className="smart-suggestion-panel">
+                <div className="suggestion-header">
+                  <div className="suggestion-title">
+                    <Sparkles size={16} />
+                    <h3>检测到床位冲突 · 智能改床建议</h3>
+                  </div>
+                  <span className="suggestion-count">{smartRecommendations.length} 条方案</span>
+                </div>
+                {smartRecommendations.length > 0 ? (
+                  <div className="suggestion-list">
+                    {smartRecommendations.map((rec, idx) => (
+                      <div key={idx} className={'suggestion-card type-' + rec.type}>
+                        <div className="suggestion-card-head">
+                          <div className="suggestion-badge">
+                            {rec.type === RECOMMEND_TYPES.SAME_SHIFT_FREE_BED && <><Bed size={12} />同班次空闲</>}
+                            {rec.type === RECOMMEND_TYPES.TIME_SLOT_FREE_BED && <><Wand2 size={12} />时段可用</>}
+                            {rec.type === RECOMMEND_TYPES.ADJUST_START_TIME && <><Clock size={12} />调整时间</>}
+                            {rec.type === RECOMMEND_TYPES.ADJACENT_SHIFT_BED && <><ArrowRightLeft size={12} />相邻班次</>}
+                          </div>
+                          <div className="suggestion-score">推荐度 {Math.round(rec.score)}</div>
+                        </div>
+                        <div className="suggestion-content">
+                          <div className="suggestion-main">
+                            <span className="suggestion-bed">{rec.bed}</span>
+                            <span className="suggestion-shift">{rec.shift}</span>
+                            <span className="suggestion-time">{rec.start} - {rec.end}</span>
+                          </div>
+                          <p className="suggestion-reason">{rec.reason}</p>
+                        </div>
+                        <button type="button" className="apply-suggestion-btn" onClick={() => applyRecommendation(rec)}>
+                          <CheckCheck size={14} />采用此方案
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="no-suggestion">
+                    <AlertTriangle size={16} />
+                    <span>暂未找到合适的替代方案，请手动调整班次、时间段或床位。</span>
+                  </div>
+                )}
+              </div>
+            )}
           </form>
         </div>
 
@@ -1226,6 +1494,7 @@ function App() {
                   <p className="record-detail">{hasOverlap(item, records) ? '存在床位时间重叠，请调整安排' : '床位时间正常'}</p>
                   {(item.conflict || hasOverlap(item, records)) && <div className="warning"><AlertTriangle size={15} />发现冲突</div>}
                   <div className="actions" onClick={(event) => event.stopPropagation()}>
+                    <button type="button" onClick={() => startEdit(item)}><Edit2 size={14} />编辑</button>
                     {appConfig.statuses.map((status) => (
                       <button key={status} type="button" onClick={() => updateStatus(item.id, status)}>{status}</button>
                     ))}
