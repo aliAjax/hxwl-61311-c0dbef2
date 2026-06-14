@@ -328,15 +328,36 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+function normalizeStoredRecords(items, by = '系统') {
+  if (!Array.isArray(items)) return [];
+  const seenIds = new Set();
+  return items.map((item) => {
+    const safeItem = item && typeof item === 'object' ? item : {};
+    const existingId = safeItem.id ? String(safeItem.id) : '';
+    const id = existingId && !seenIds.has(existingId) ? existingId : uid();
+    seenIds.add(id);
+    const status = safeItem.status || appConfig.primaryStatus;
+    const timeline = Array.isArray(safeItem.timeline) && safeItem.timeline.length > 0
+      ? safeItem.timeline
+      : [{ status, at: today, by }];
+    return { ...safeItem, id, status, timeline };
+  });
+}
+
 function withIds(items) {
-  return items.map((item) => ({ id: uid(), timeline: item.timeline || [{ status: item.status, at: today, by: '系统' }], ...item }));
+  return normalizeStoredRecords(items);
 }
 
 function loadRecords() {
   const raw = localStorage.getItem(appConfig.storage);
   if (raw) {
     try {
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      const normalized = normalizeStoredRecords(parsed, '历史数据');
+      if (normalized.length > 0 && JSON.stringify(normalized) !== JSON.stringify(parsed)) {
+        localStorage.setItem(appConfig.storage, JSON.stringify(normalized));
+      }
+      return normalized.length > 0 ? normalized : withIds(appConfig.seed);
     } catch {
       return withIds(appConfig.seed);
     }
@@ -742,7 +763,7 @@ const SCHEDULING_RULES = [
         if (!cr.end) return true;
         const crEnd = timeToMinutes(cr.end);
         if (isCrossDay(cr.start, cr.end)) {
-          return targetStart < 24 * 60 || targetStart < crEnd + 30;
+          return targetStart >= timeToMinutes(cr.start) || targetStart < crEnd + 30;
         }
         return targetStart < crEnd + 30;
       });
