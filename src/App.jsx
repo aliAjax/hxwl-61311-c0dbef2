@@ -547,7 +547,8 @@ function App() {
       counts[status] = todayRecords.filter((item) => item.status === status).length;
     }
     const conflictRecords = todayRecords.filter((item) => item.conflict || hasOverlap(item, records));
-    counts['存在冲突'] = conflictRecords.length;
+    const conflictBeds = new Set(conflictRecords.map((item) => item.bed));
+    counts['存在冲突'] = conflictBeds.size;
 
     const focusRecords = todayRecords.filter((item) => {
       if (item.conflict || hasOverlap(item, records)) return true;
@@ -556,10 +557,11 @@ function App() {
       return false;
     });
 
-    return { counts, conflictRecords, focusRecords };
+    return { counts, conflictRecords, focusRecords, conflictBeds: Array.from(conflictBeds) };
   }, [todayRecords, records]);
 
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
 
   const handleCopySummary = useCallback(() => {
     const { counts, focusRecords } = handoverSummary;
@@ -575,17 +577,47 @@ function App() {
     if (focusRecords.length > 0) {
       lines.push('— 需重点交接 —');
       focusRecords.forEach((item, i) => {
-        const reason = (item.conflict || hasOverlap(item, records)) ? '冲突' : item.status;
         lines.push(`${i + 1}. ${item.bed} · ${item.patient} · ${item.shift} ${item.start}-${item.end} · ${item.status}${(item.conflict || hasOverlap(item, records)) ? ' [冲突]' : ''}`);
       });
     } else {
       lines.push('— 无需重点交接记录 —');
     }
     const text = lines.join('\n');
-    navigator.clipboard.writeText(text).then(() => {
+
+    const handleSuccess = () => {
       setCopied(true);
+      setCopyError(false);
       setTimeout(() => setCopied(false), 2000);
-    });
+    };
+
+    const handleFailure = (err) => {
+      console.warn('复制失败:', err);
+      setCopyError(true);
+      setTimeout(() => setCopyError(false), 3000);
+    };
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(handleSuccess).catch(handleFailure);
+    } else {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        const success = document.execCommand('copy');
+        if (success) {
+          handleSuccess();
+        } else {
+          handleFailure(new Error('execCommand failed'));
+        }
+      } catch (err) {
+        handleFailure(err);
+      } finally {
+        document.body.removeChild(textarea);
+      }
+    }
   }, [handoverSummary, records]);
 
   const metrics = [
@@ -665,9 +697,14 @@ function App() {
               <ClipboardCopy size={18} />
               <h2>今日交接摘要</h2>
             </div>
-            <button type="button" className={'copy-btn' + (copied ? ' copied' : '')} onClick={handleCopySummary}>
-              <ClipboardCopy size={15} />
-              {copied ? '已复制' : '复制摘要'}
+            <button
+              type="button"
+              className={'copy-btn' + (copied ? ' copied' : '') + (copyError ? ' error' : '')}
+              onClick={handleCopySummary}
+              title={copyError ? '复制失败，请手动复制' : ''}
+            >
+              {copyError ? <AlertCircle size={15} /> : <ClipboardCopy size={15} />}
+              {copyError ? '复制失败' : copied ? '已复制' : '复制摘要'}
             </button>
           </div>
           <div className="handover-counts">

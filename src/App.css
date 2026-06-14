@@ -612,6 +612,12 @@ textarea { min-height: 76px; resize: vertical; }
   color: #166534;
 }
 
+.copy-btn.error {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #b91c1c;
+}
+
 .handover-counts {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
