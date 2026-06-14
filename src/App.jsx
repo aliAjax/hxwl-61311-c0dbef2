@@ -1,5 +1,5 @@
 import { useMemo, useState, useCallback } from 'react';
-import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, Upload, FileText, X, AlertCircle, CheckCheck, LayoutGrid, List, ClipboardCopy, Clock, GitBranch, User, Calendar, Filter, ArrowRightLeft, AlertOctagon, History, Sparkles, Wand2, Save, Edit2 } from 'lucide-react';
+import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, Upload, FileText, X, AlertCircle, CheckCheck, LayoutGrid, List, ClipboardCopy, Clock, GitBranch, User, Calendar, Filter, ArrowRightLeft, AlertOctagon, History, Sparkles, Wand2, Save, Edit2, Activity, ChevronRight, ArrowLeft } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -75,12 +75,57 @@ const appConfig = {
   "seed": [
     {
       "patient": "吴阿姨",
+      "date": "2026-06-10",
+      "shift": "上午",
+      "bed": "B02",
+      "start": "08:00",
+      "end": "12:00",
+      "status": "已完成"
+    },
+    {
+      "patient": "吴阿姨",
+      "date": "2026-06-12",
+      "shift": "上午",
+      "bed": "B03",
+      "start": "08:00",
+      "end": "12:00",
+      "status": "已完成"
+    },
+    {
+      "patient": "吴阿姨",
       "date": "2026-06-14",
       "shift": "上午",
       "bed": "B03",
       "start": "08:00",
       "end": "12:00",
       "status": "透析中"
+    },
+    {
+      "patient": "吴阿姨",
+      "date": "2026-06-16",
+      "shift": "上午",
+      "bed": "B03",
+      "start": "08:00",
+      "end": "12:00",
+      "status": "待到达"
+    },
+    {
+      "patient": "赵先生",
+      "date": "2026-06-09",
+      "shift": "下午",
+      "bed": "B01",
+      "start": "13:00",
+      "end": "17:00",
+      "status": "已完成"
+    },
+    {
+      "patient": "赵先生",
+      "date": "2026-06-11",
+      "shift": "下午",
+      "bed": "B02",
+      "start": "12:30",
+      "end": "16:30",
+      "status": "已完成"
     },
     {
       "patient": "赵先生",
@@ -90,6 +135,42 @@ const appConfig = {
       "start": "12:30",
       "end": "16:30",
       "status": "待到达"
+    },
+    {
+      "patient": "赵先生",
+      "date": "2026-06-15",
+      "shift": "下午",
+      "bed": "B04",
+      "start": "13:00",
+      "end": "17:00",
+      "status": "待到达"
+    },
+    {
+      "patient": "陈叔叔",
+      "date": "2026-06-08",
+      "shift": "上午",
+      "bed": "B01",
+      "start": "08:30",
+      "end": "12:30",
+      "status": "已完成"
+    },
+    {
+      "patient": "陈叔叔",
+      "date": "2026-06-10",
+      "shift": "上午",
+      "bed": "B01",
+      "start": "08:30",
+      "end": "12:30",
+      "status": "已完成"
+    },
+    {
+      "patient": "陈叔叔",
+      "date": "2026-06-12",
+      "shift": "上午",
+      "bed": "B02",
+      "start": "09:00",
+      "end": "13:00",
+      "status": "已完成"
     },
     {
       "patient": "陈叔叔",
@@ -102,6 +183,24 @@ const appConfig = {
     },
     {
       "patient": "刘奶奶",
+      "date": "2026-06-11",
+      "shift": "上午",
+      "bed": "B04",
+      "start": "09:00",
+      "end": "13:00",
+      "status": "已完成"
+    },
+    {
+      "patient": "刘奶奶",
+      "date": "2026-06-13",
+      "shift": "上午",
+      "bed": "B05",
+      "start": "10:00",
+      "end": "14:00",
+      "status": "已完成"
+    },
+    {
+      "patient": "刘奶奶",
       "date": "2026-06-14",
       "shift": "上午",
       "bed": "B03",
@@ -111,11 +210,65 @@ const appConfig = {
     },
     {
       "patient": "周大爷",
+      "date": "2026-06-09",
+      "shift": "夜间",
+      "bed": "B02",
+      "start": "19:00",
+      "end": "23:00",
+      "status": "已完成"
+    },
+    {
+      "patient": "周大爷",
+      "date": "2026-06-11",
+      "shift": "夜间",
+      "bed": "B02",
+      "start": "19:00",
+      "end": "23:00",
+      "status": "已完成"
+    },
+    {
+      "patient": "周大爷",
+      "date": "2026-06-13",
+      "shift": "夜间",
+      "bed": "B03",
+      "start": "18:30",
+      "end": "22:30",
+      "status": "已完成"
+    },
+    {
+      "patient": "周大爷",
       "date": "2026-06-14",
       "shift": "夜间",
       "bed": "B02",
       "start": "19:00",
       "end": "23:00",
+      "status": "待到达"
+    },
+    {
+      "patient": "孙大娘",
+      "date": "2026-06-10",
+      "shift": "下午",
+      "bed": "B04",
+      "start": "14:00",
+      "end": "18:00",
+      "status": "已完成"
+    },
+    {
+      "patient": "孙大娘",
+      "date": "2026-06-12",
+      "shift": "下午",
+      "bed": "B05",
+      "start": "14:00",
+      "end": "18:00",
+      "status": "已完成"
+    },
+    {
+      "patient": "孙大娘",
+      "date": "2026-06-14",
+      "shift": "下午",
+      "bed": "B04",
+      "start": "14:00",
+      "end": "18:00",
       "status": "待到达"
     }
   ],
@@ -728,6 +881,10 @@ function App() {
   });
   const [selectedAuditRecord, setSelectedAuditRecord] = useState(null);
 
+  const [patientTrackView, setPatientTrackView] = useState(false);
+  const [selectedPatient, setSelectedPatient] = useState(null);
+  const [patientSearchQuery, setPatientSearchQuery] = useState('');
+
   function persist(next) {
     setRecords(next);
     localStorage.setItem(appConfig.storage, JSON.stringify(next));
@@ -1167,6 +1324,57 @@ function App() {
     });
   }, [records, auditFilters]);
 
+  const patientGroups = useMemo(() => {
+    const groups = {};
+    records.forEach((item) => {
+      const name = item.patient || '未知';
+      (groups[name] ||= []).push(item);
+    });
+    return Object.entries(groups).map(([name, items]) => {
+      const sorted = [...items].sort((a, b) => {
+        const dateDiff = String(a.date).localeCompare(String(b.date));
+        if (dateDiff !== 0) return dateDiff;
+        return (a.start || '').localeCompare(b.start || '');
+      });
+      const beds = [...new Set(sorted.map((r) => r.bed).filter(Boolean))];
+      const completedCount = sorted.filter((r) => r.status === '已完成').length;
+      const incompleteRecords = sorted.filter((r) => r.status !== '已完成');
+      const recentItem = sorted.length > 0 ? sorted[sorted.length - 1] : null;
+      const bedChangePoints = [];
+      for (let i = 1; i < sorted.length; i++) {
+        if (sorted[i].bed && sorted[i - 1].bed && sorted[i].bed !== sorted[i - 1].bed) {
+          bedChangePoints.push({
+            date: sorted[i].date,
+            from: sorted[i - 1].bed,
+            to: sorted[i].bed,
+          });
+        }
+      }
+      return {
+        name,
+        records: sorted,
+        totalSessions: sorted.length,
+        completedSessions: completedCount,
+        incompleteSessions: incompleteRecords.length,
+        incompleteRecords,
+        beds,
+        bedChanges: bedChangePoints,
+        recentSchedule: recentItem,
+      };
+    }).sort((a, b) => b.totalSessions - a.totalSessions);
+  }, [records]);
+
+  const filteredPatientGroups = useMemo(() => {
+    if (!patientSearchQuery.trim()) return patientGroups;
+    const query = patientSearchQuery.trim().toLowerCase();
+    return patientGroups.filter((g) => g.name.toLowerCase().includes(query));
+  }, [patientGroups, patientSearchQuery]);
+
+  const selectedPatientDetail = useMemo(() => {
+    if (!selectedPatient) return null;
+    return patientGroups.find((g) => g.name === selectedPatient) || null;
+  }, [patientGroups, selectedPatient]);
+
   const auditStats = useMemo(() => {
     const total = auditRecords.length;
     const withAbnormalities = auditRecords.filter((r) => r.hasAbnormalities).length;
@@ -1353,22 +1561,194 @@ function App() {
               {appConfig.statuses.map((status) => <option key={status}>{status}</option>)}
             </select>
             <div className="view-toggle">
-              <button type="button" className={'toggle-btn ' + (!auditViewMode && viewMode === 'list' ? 'active' : '')} onClick={() => { setAuditViewMode(false); setViewMode('list'); }} title="列表视图">
+              <button type="button" className={'toggle-btn ' + (!auditViewMode && !patientTrackView && viewMode === 'list' ? 'active' : '')} onClick={() => { setAuditViewMode(false); setPatientTrackView(false); setSelectedPatient(null); setViewMode('list'); }} title="列表视图">
                 <List size={16} />
               </button>
-              <button type="button" className={'toggle-btn ' + (!auditViewMode && viewMode === 'calendar' ? 'active' : '')} onClick={() => { setAuditViewMode(false); setViewMode('calendar'); }} title="日历视图">
+              <button type="button" className={'toggle-btn ' + (!auditViewMode && !patientTrackView && viewMode === 'calendar' ? 'active' : '')} onClick={() => { setAuditViewMode(false); setPatientTrackView(false); setSelectedPatient(null); setViewMode('calendar'); }} title="日历视图">
                 <LayoutGrid size={16} />
               </button>
-              <button type="button" className={'toggle-btn ' + (!auditViewMode && viewMode === 'timeline' ? 'active' : '')} onClick={() => { setAuditViewMode(false); setViewMode('timeline'); }} title="时间轴视图">
+              <button type="button" className={'toggle-btn ' + (!auditViewMode && !patientTrackView && viewMode === 'timeline' ? 'active' : '')} onClick={() => { setAuditViewMode(false); setPatientTrackView(false); setSelectedPatient(null); setViewMode('timeline'); }} title="时间轴视图">
                 <Clock size={16} />
               </button>
               <button type="button" className={'toggle-btn audit-toggle ' + (auditViewMode ? 'active' : '')} onClick={() => setAuditViewMode(!auditViewMode)} title="状态流转审计">
                 <GitBranch size={16} />
               </button>
+              <button type="button" className={'toggle-btn patient-track-toggle ' + (patientTrackView ? 'active' : '')} onClick={() => { setPatientTrackView(!patientTrackView); if (patientTrackView) { setSelectedPatient(null); setPatientSearchQuery(''); } }} title="患者连续排班追踪">
+                <Activity size={16} />
+              </button>
             </div>
           </div>
 
-          {auditViewMode ? (
+          {patientTrackView ? (
+            <div className="patient-track-panel">
+              {selectedPatient && selectedPatientDetail ? (
+                <div className="patient-detail-view">
+                  <div className="patient-detail-header">
+                    <button type="button" className="patient-back-btn" onClick={() => setSelectedPatient(null)}>
+                      <ArrowLeft size={16} />
+                      <span>返回患者列表</span>
+                    </button>
+                    <div className="patient-detail-title">
+                      <User size={20} />
+                      <h2>{selectedPatientDetail.name}</h2>
+                    </div>
+                  </div>
+
+                  <div className="patient-detail-stats">
+                    <div className="patient-stat-card">
+                      <span className="patient-stat-label">总透析次数</span>
+                      <span className="patient-stat-value">{selectedPatientDetail.totalSessions}</span>
+                    </div>
+                    <div className="patient-stat-card completed">
+                      <span className="patient-stat-label">已完成</span>
+                      <span className="patient-stat-value">{selectedPatientDetail.completedSessions}</span>
+                    </div>
+                    <div className="patient-stat-card incomplete">
+                      <span className="patient-stat-label">未完成</span>
+                      <span className="patient-stat-value">{selectedPatientDetail.incompleteSessions}</span>
+                    </div>
+                    <div className="patient-stat-card beds">
+                      <span className="patient-stat-label">使用床位</span>
+                      <span className="patient-stat-value">{selectedPatientDetail.beds.length}</span>
+                    </div>
+                  </div>
+
+                  {selectedPatientDetail.recentSchedule && (
+                    <div className="patient-recent-section">
+                      <h4 className="patient-section-title"><Clock size={16} />最近安排</h4>
+                      <div className="patient-recent-card">
+                        <div className="patient-recent-main">
+                          <span className="patient-recent-date">{selectedPatientDetail.recentSchedule.date}</span>
+                          <span className="patient-recent-shift">{selectedPatientDetail.recentSchedule.shift}</span>
+                          <span className="patient-recent-bed">{selectedPatientDetail.recentSchedule.bed}</span>
+                        </div>
+                        <div className="patient-recent-meta">
+                          <span>{selectedPatientDetail.recentSchedule.start} - {selectedPatientDetail.recentSchedule.end}</span>
+                          <span className={'status ' + statusClass(selectedPatientDetail.recentSchedule.status)}>{selectedPatientDetail.recentSchedule.status}</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {selectedPatientDetail.bedChanges.length > 0 && (
+                    <div className="patient-bed-changes-section">
+                      <h4 className="patient-section-title"><ArrowRightLeft size={16} />床位变化</h4>
+                      <div className="patient-bed-changes-list">
+                        {selectedPatientDetail.bedChanges.map((change, idx) => (
+                          <div key={idx} className="patient-bed-change-item">
+                            <span className="bed-change-date">{change.date}</span>
+                            <span className="bed-change-from">{change.from}</span>
+                            <ArrowRightLeft size={14} className="bed-change-arrow" />
+                            <span className="bed-change-to">{change.to}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {selectedPatientDetail.incompleteRecords.length > 0 && (
+                    <div className="patient-incomplete-section">
+                      <h4 className="patient-section-title"><AlertCircle size={16} />未完成记录</h4>
+                      <div className="patient-incomplete-list">
+                        {selectedPatientDetail.incompleteRecords.map((item) => (
+                          <div key={item.id} className="patient-incomplete-item" onClick={() => setSelected(item)}>
+                            <div className="patient-incomplete-main">
+                              <span className="patient-incomplete-date">{item.date}</span>
+                              <span className="patient-incomplete-shift">{item.shift}</span>
+                              <span className="patient-incomplete-bed">{item.bed}</span>
+                            </div>
+                            <div className="patient-incomplete-meta">
+                              <span>{item.start}-{item.end}</span>
+                              <span className={'status ' + statusClass(item.status)}>{item.status}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="patient-timeline-section">
+                    <h4 className="patient-section-title"><History size={16} />透析时间线</h4>
+                    <div className="patient-timeline-list">
+                      {selectedPatientDetail.records.map((item, idx) => (
+                        <div key={item.id} className="patient-timeline-item" onClick={() => setSelected(item)}>
+                          <div className="patient-timeline-dot-wrapper">
+                            <div className={'patient-timeline-dot ' + statusClass(item.status)}></div>
+                            {idx < selectedPatientDetail.records.length - 1 && <div className="patient-timeline-line"></div>}
+                          </div>
+                          <div className="patient-timeline-content">
+                            <div className="patient-timeline-head">
+                              <span className="patient-timeline-date">{item.date}</span>
+                              <span className="patient-timeline-shift">{item.shift}</span>
+                              <span className={'status ' + statusClass(item.status)}>{item.status}</span>
+                            </div>
+                            <div className="patient-timeline-meta">
+                              <span className="patient-timeline-bed"><Bed size={12} />{item.bed}</span>
+                              <span className="patient-timeline-time">{item.start}-{item.end}</span>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="patient-track-search">
+                    <Search size={16} />
+                    <input
+                      value={patientSearchQuery}
+                      onChange={(e) => setPatientSearchQuery(e.target.value)}
+                      placeholder="按患者姓名搜索"
+                    />
+                  </div>
+                  {filteredPatientGroups.length === 0 ? (
+                    <p className="empty">{patientSearchQuery ? '未找到匹配的患者' : '暂无患者排班数据'}</p>
+                  ) : (
+                    <div className="patient-track-list">
+                      {filteredPatientGroups.map((group) => (
+                        <article className="patient-track-card" key={group.name} onClick={() => setSelectedPatient(group.name)}>
+                          <div className="patient-track-card-head">
+                            <div className="patient-track-avatar">
+                              <User size={18} />
+                            </div>
+                            <div className="patient-track-info">
+                              <h3>{group.name}</h3>
+                              <p>{group.totalSessions} 次透析 · {group.beds.length} 个床位</p>
+                            </div>
+                            <ChevronRight size={18} className="patient-track-chevron" />
+                          </div>
+                          <div className="patient-track-card-stats">
+                            <div className="patient-track-mini-stat">
+                              <span className="mini-stat-label">已完成</span>
+                              <span className="mini-stat-value completed">{group.completedSessions}</span>
+                            </div>
+                            <div className="patient-track-mini-stat">
+                              <span className="mini-stat-label">未完成</span>
+                              <span className="mini-stat-value incomplete">{group.incompleteSessions}</span>
+                            </div>
+                            <div className="patient-track-mini-stat">
+                              <span className="mini-stat-label">床位变化</span>
+                              <span className="mini-stat-value">{group.bedChanges.length}</span>
+                            </div>
+                          </div>
+                          {group.recentSchedule && (
+                            <div className="patient-track-recent">
+                              <span className="recent-label">最近</span>
+                              <span className="recent-date">{group.recentSchedule.date}</span>
+                              <span className="recent-shift">{group.recentSchedule.shift}</span>
+                              <span className="recent-bed">{group.recentSchedule.bed}</span>
+                              <span className={'status ' + statusClass(group.recentSchedule.status)}>{group.recentSchedule.status}</span>
+                            </div>
+                          )}
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          ) : auditViewMode ? (
             <div className="audit-panel">
               <div className="audit-toolbar">
                 <div className="audit-filters">
@@ -1767,6 +2147,20 @@ function App() {
               <h3>{`${selected.bed} · ${selected.patient}`}</h3>
               <p>{`${selected.date} ${selected.shift} · ${selected.start}-${selected.end}`}</p>
               <p>{hasOverlap(selected, records) ? '存在床位时间重叠，请调整安排' : '床位时间正常'}</p>
+              
+              <button
+                type="button"
+                className="view-patient-track-btn"
+                onClick={() => {
+                  setPatientTrackView(true);
+                  setSelectedPatient(selected.patient);
+                  setAuditViewMode(false);
+                }}
+              >
+                <Activity size={14} />
+                查看患者连续排班
+              </button>
+              
               {selected.temps && (
                 <div className="temp-chart">
                   {selected.temps.map((value, index) => <i key={index} style={{ height: Math.max(10, 56 + Number(value) * 8) }} title={String(value)} />)}
