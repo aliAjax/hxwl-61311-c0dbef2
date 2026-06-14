@@ -435,11 +435,15 @@ function normalizeBackupRecords(rawRecords) {
   const validationResults = rawRecords.map((r, idx) => {
     const result = validateBackupRecord(r, idx);
     if (result.valid && result.normalized) {
+      const hadId = !!result.normalized.id;
+      const originalId = result.normalized.id || null;
       if (!result.normalized.id || existingIds.has(result.normalized.id)) {
         const newId = uid();
         result.normalized.id = newId;
       }
       existingIds.add(result.normalized.id);
+      result.normalized._originalId = originalId;
+      result.normalized._hadIdInBackup = hadId;
       if (!result.normalized.timeline || !Array.isArray(result.normalized.timeline) || result.normalized.timeline.length === 0) {
         result.normalized.timeline = [{ status: result.normalized.status, at: today, by: '备份恢复' }];
       }
@@ -452,6 +456,10 @@ function normalizeBackupRecords(rawRecords) {
   return { validRecords, validationResults, fatal: null };
 }
 
+function contentKey(rec) {
+  return `${rec.patient}∣${rec.date}∣${rec.shift}∣${rec.bed}∣${rec.start}∣${rec.end}`;
+}
+
 function computeDiffSummary(currentRecords, importedRecords) {
   const currentMap = new Map(currentRecords.map(r => [r.id, r]));
   const importedMap = new Map(importedRecords.map(r => [r.id, r]));
@@ -460,12 +468,14 @@ function computeDiffSummary(currentRecords, importedRecords) {
   const updated = [];
   const unchanged = [];
   const removedIds = [];
+  const matchedCurrentIds = new Set();
+
+  const idUnmatched = [];
 
   for (const rec of importedRecords) {
-    if (!currentMap.has(rec.id)) {
-      added.push(rec);
-    } else {
+    if (currentMap.has(rec.id) && rec._hadIdInBackup) {
       const current = currentMap.get(rec.id);
+      matchedCurrentIds.add(rec.id);
       const changed = REQUIRED_FIELDS.some(k => String(current[k] || '') !== String(rec[k] || ''))
         || current.status !== rec.status;
       if (changed) {
@@ -473,11 +483,45 @@ function computeDiffSummary(currentRecords, importedRecords) {
       } else {
         unchanged.push(rec);
       }
+    } else {
+      idUnmatched.push(rec);
+    }
+  }
+
+  if (idUnmatched.length > 0) {
+    const currentByContent = new Map();
+    for (const cr of currentRecords) {
+      if (matchedCurrentIds.has(cr.id)) continue;
+      const key = contentKey(cr);
+      if (!currentByContent.has(key)) currentByContent.set(key, []);
+      currentByContent.get(key).push(cr);
+    }
+
+    const usedCurrentIds = new Set();
+    for (const rec of idUnmatched) {
+      const key = contentKey(rec);
+      const candidates = currentByContent.get(key);
+      if (candidates) {
+        const match = candidates.find(c => !usedCurrentIds.has(c.id) && recordsEqualIgnoringId(c, rec));
+        if (match) {
+          usedCurrentIds.add(match.id);
+          matchedCurrentIds.add(match.id);
+          const changed = REQUIRED_FIELDS.some(k => String(match[k] || '') !== String(rec[k] || ''))
+            || match.status !== rec.status;
+          if (changed) {
+            updated.push({ old: match, new: rec });
+          } else {
+            unchanged.push(rec);
+          }
+          continue;
+        }
+      }
+      added.push(rec);
     }
   }
 
   for (const id of currentMap.keys()) {
-    if (!importedMap.has(id)) {
+    if (!matchedCurrentIds.has(id)) {
       removedIds.push(id);
     }
   }
