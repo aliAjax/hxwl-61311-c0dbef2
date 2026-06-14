@@ -1,5 +1,5 @@
-import { useMemo, useState, useCallback } from 'react';
-import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, Upload, FileText, X, AlertCircle, CheckCheck, LayoutGrid, List, ClipboardCopy, Clock, GitBranch, User, Calendar, Filter, ArrowRightLeft, AlertOctagon, History, Sparkles, Wand2, Save, Edit2, Activity, ChevronRight, ArrowLeft } from 'lucide-react';
+import { useMemo, useState, useCallback, useRef } from 'react';
+import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, Upload, FileText, X, AlertCircle, CheckCheck, LayoutGrid, List, ClipboardCopy, Clock, GitBranch, User, Calendar, Filter, ArrowRightLeft, AlertOctagon, History, Sparkles, Wand2, Save, Edit2, Activity, ChevronRight, ArrowLeft, Download, Database, HardDriveUpload } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -342,6 +342,151 @@ function loadRecords() {
     }
   }
   return withIds(appConfig.seed);
+}
+
+const BACKUP_VERSION = 1;
+const BACKUP_META = { appId: appConfig.id, domain: appConfig.domain };
+
+const REQUIRED_FIELDS = ['patient', 'date', 'shift', 'bed', 'start', 'end'];
+
+function exportBackup(records) {
+  const payload = {
+    version: BACKUP_VERSION,
+    meta: { ...BACKUP_META, exportedAt: new Date().toISOString(), recordCount: records.length },
+    records
+  };
+  const json = JSON.stringify(payload, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  a.href = url;
+  a.download = `${appConfig.id}-backup-${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function validateBackupRecord(record, index) {
+  const errors = [];
+  const warnings = [];
+
+  if (!record || typeof record !== 'object') {
+    return { valid: false, errors: [`第 ${index + 1} 条记录不是有效对象`], warnings: [], normalized: null, index };
+  }
+
+  for (const key of REQUIRED_FIELDS) {
+    const val = record[key];
+    if (val === undefined || val === null || String(val).trim() === '') {
+      errors.push(`缺少必要字段「${appConfig.fields.find(f => f.key === key)?.label || key}」`);
+    }
+  }
+
+  if (record.date && !DATE_REGEX.test(normalizeDate(record.date))) {
+    errors.push('日期格式错误，应为 YYYY-MM-DD');
+  }
+  if (record.start && !isValidTime(record.start)) {
+    errors.push('开始时间格式错误，应为 HH:MM');
+  }
+  if (record.end && !isValidTime(record.end)) {
+    errors.push('结束时间格式错误，应为 HH:MM');
+  }
+  if (record.start && record.end && isValidTime(record.start) && isValidTime(record.end) && !(normalizeTime(record.start) < normalizeTime(record.end))) {
+    errors.push('开始时间须早于结束时间');
+  }
+  if (record.status && !appConfig.statuses.includes(record.status)) {
+    warnings.push(`状态「${record.status}」不在允许列表中，将使用默认状态「${appConfig.primaryStatus}」`);
+  }
+
+  const normalized = {
+    ...record,
+    date: record.date ? normalizeDate(record.date) : '',
+    start: record.start ? normalizeTime(record.start) : '',
+    end: record.end ? normalizeTime(record.end) : '',
+    status: appConfig.statuses.includes(record.status) ? record.status : appConfig.primaryStatus,
+    patient: String(record.patient || '').trim(),
+    shift: String(record.shift || '').trim(),
+    bed: String(record.bed || '').trim()
+  };
+
+  if (!normalized.id) {
+    warnings.push('缺少 id，将自动生成');
+  }
+  if (!normalized.timeline || !Array.isArray(normalized.timeline) || normalized.timeline.length === 0) {
+    warnings.push('缺少 timeline 历史，将自动补齐');
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings,
+    normalized,
+    index
+  };
+}
+
+function normalizeBackupRecords(rawRecords) {
+  if (!Array.isArray(rawRecords)) {
+    return { validRecords: [], validationResults: [], fatal: '备份文件中 records 字段不是数组' };
+  }
+
+  const existingIds = new Set();
+  const validationResults = rawRecords.map((r, idx) => {
+    const result = validateBackupRecord(r, idx);
+    if (result.valid && result.normalized) {
+      if (!result.normalized.id || existingIds.has(result.normalized.id)) {
+        const newId = uid();
+        result.normalized.id = newId;
+      }
+      existingIds.add(result.normalized.id);
+      if (!result.normalized.timeline || !Array.isArray(result.normalized.timeline) || result.normalized.timeline.length === 0) {
+        result.normalized.timeline = [{ status: result.normalized.status, at: today, by: '备份恢复' }];
+      }
+      result.normalized.createdAt = result.normalized.createdAt || new Date().toISOString();
+    }
+    return result;
+  });
+
+  const validRecords = validationResults.filter(r => r.valid).map(r => r.normalized);
+  return { validRecords, validationResults, fatal: null };
+}
+
+function computeDiffSummary(currentRecords, importedRecords) {
+  const currentMap = new Map(currentRecords.map(r => [r.id, r]));
+  const importedMap = new Map(importedRecords.map(r => [r.id, r]));
+
+  const added = [];
+  const updated = [];
+  const unchanged = [];
+  const removedIds = [];
+
+  for (const rec of importedRecords) {
+    if (!currentMap.has(rec.id)) {
+      added.push(rec);
+    } else {
+      const current = currentMap.get(rec.id);
+      const changed = REQUIRED_FIELDS.some(k => String(current[k] || '') !== String(rec[k] || ''))
+        || current.status !== rec.status;
+      if (changed) {
+        updated.push({ old: current, new: rec });
+      } else {
+        unchanged.push(rec);
+      }
+    }
+  }
+
+  for (const id of currentMap.keys()) {
+    if (!importedMap.has(id)) {
+      removedIds.push(id);
+    }
+  }
+
+  return { added, updated, unchanged, removedIds };
+}
+
+function recordsEqualIgnoringId(a, b) {
+  return REQUIRED_FIELDS.every(k => String(a[k] || '') === String(b[k] || '')) && a.status === b.status;
 }
 
 function avg(numbers) {
@@ -885,6 +1030,15 @@ function App() {
   const [selectedPatient, setSelectedPatient] = useState(null);
   const [patientSearchQuery, setPatientSearchQuery] = useState('');
 
+  const [backupOpen, setBackupOpen] = useState(false);
+  const [backupFileName, setBackupFileName] = useState('');
+  const [backupValidationResults, setBackupValidationResults] = useState([]);
+  const [backupValidRecords, setBackupValidRecords] = useState([]);
+  const [backupDiff, setBackupDiff] = useState(null);
+  const [backupFatalError, setBackupFatalError] = useState('');
+  const [backupMeta, setBackupMeta] = useState(null);
+  const backupFileInputRef = useRef(null);
+
   function persist(next) {
     setRecords(next);
     localStorage.setItem(appConfig.storage, JSON.stringify(next));
@@ -936,6 +1090,108 @@ function App() {
     const withWarnings = parsedPreview.filter((p) => p.warnings.length > 0).length;
     return { total, valid, withErrors, withWarnings };
   }, [parsedPreview]);
+
+  function handleBackupOpen() {
+    setBackupOpen(true);
+    setBackupFileName('');
+    setBackupValidationResults([]);
+    setBackupValidRecords([]);
+    setBackupDiff(null);
+    setBackupFatalError('');
+    setBackupMeta(null);
+  }
+
+  function handleBackupClose() {
+    setBackupOpen(false);
+    setBackupFileName('');
+    setBackupValidationResults([]);
+    setBackupValidRecords([]);
+    setBackupDiff(null);
+    setBackupFatalError('');
+    setBackupMeta(null);
+    if (backupFileInputRef.current) backupFileInputRef.current.value = '';
+  }
+
+  function handleExportBackup() {
+    exportBackup(records);
+  }
+
+  function handleBackupFileSelect(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setBackupFileName(file.name);
+    setBackupValidationResults([]);
+    setBackupValidRecords([]);
+    setBackupDiff(null);
+    setBackupFatalError('');
+    setBackupMeta(null);
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const text = e.target?.result;
+        if (!text || typeof text !== 'string') {
+          setBackupFatalError('文件内容为空或无法读取');
+          return;
+        }
+        const parsed = JSON.parse(text);
+
+        if (!parsed || typeof parsed !== 'object') {
+          setBackupFatalError('文件内容不是有效的 JSON 对象');
+          return;
+        }
+
+        if (parsed.meta && parsed.meta.appId && parsed.meta.appId !== appConfig.id) {
+          setBackupFatalError(`备份文件来源不匹配：预期「${appConfig.id}」，实际「${parsed.meta.appId}」`);
+          return;
+        }
+
+        setBackupMeta(parsed.meta || null);
+
+        const rawRecords = parsed.records || parsed;
+        const { validRecords, validationResults, fatal } = normalizeBackupRecords(rawRecords);
+        if (fatal) {
+          setBackupFatalError(fatal);
+          return;
+        }
+
+        setBackupValidationResults(validationResults);
+        setBackupValidRecords(validRecords);
+
+        if (validRecords.length > 0) {
+          const diff = computeDiffSummary(records, validRecords);
+          setBackupDiff(diff);
+        }
+      } catch (err) {
+        console.error(err);
+        setBackupFatalError('JSON 解析失败：' + (err instanceof Error ? err.message : String(err)));
+      }
+    };
+    reader.onerror = () => {
+      setBackupFatalError('文件读取失败');
+    };
+    reader.readAsText(file);
+  }
+
+  function handleConfirmRestore() {
+    if (backupValidRecords.length === 0) return;
+    const hasInvalid = backupValidationResults.some((r) => !r.valid);
+    if (hasInvalid) {
+      alert(`存在 ${backupValidationResults.filter((r) => !r.valid).length} 条无效记录，请先修正或移除后再恢复。`);
+      return;
+    }
+    persist(backupValidRecords);
+    handleBackupClose();
+  }
+
+  const backupStats = useMemo(() => {
+    const total = backupValidationResults.length;
+    const valid = backupValidationResults.filter((r) => r.valid).length;
+    const invalid = total - valid;
+    const withWarnings = backupValidationResults.filter((r) => r.warnings.length > 0).length;
+    return { total, valid, invalid, withWarnings };
+  }, [backupValidationResults]);
 
   function addRecord(event) {
     event.preventDefault();
@@ -1501,6 +1757,16 @@ function App() {
                 <button type="button" className="secondary" onClick={handleImportOpen}><Upload size={18} />批量导入</button>
               )}
             </div>
+            {!editing && (
+              <div className="backup-actions">
+                <button type="button" className="backup-btn" onClick={handleExportBackup}>
+                  <Download size={15} />导出备份
+                </button>
+                <button type="button" className="backup-btn" onClick={handleBackupOpen}>
+                  <HardDriveUpload size={15} />导入恢复
+                </button>
+              </div>
+            )}
             <p className="hint">{appConfig.note}</p>
 
             {formHasConflict && (
@@ -2252,6 +2518,290 @@ function App() {
               <button type="button" className="secondary" onClick={handleImportClose}>取消</button>
               <button type="button" className="primary" onClick={handleConfirmImport} disabled={importStats.valid === 0}>
                 <Plus size={16} />确认导入 {importStats.valid} 条
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {backupOpen && (
+        <div className="modal-overlay" onClick={handleBackupClose}>
+          <div className="modal backup-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="panel-title">
+                <Database size={18} />
+                <h2>本地数据备份与恢复</h2>
+              </div>
+              <button type="button" className="icon-btn" onClick={handleBackupClose}><X size={18} /></button>
+            </div>
+            <div className="modal-body">
+              <div className="backup-section">
+                <div className="backup-export-card">
+                  <div className="backup-card-head">
+                    <Download size={22} />
+                    <div>
+                      <h3>导出当前数据</h3>
+                      <p>将当前 {records.length} 条透析排班记录导出为 JSON 备份文件，保存到本地。</p>
+                    </div>
+                  </div>
+                  <button type="button" className="primary" onClick={handleExportBackup}>
+                    <Download size={16} />下载备份文件
+                  </button>
+                </div>
+              </div>
+
+              <div className="backup-divider">
+                <span>或</span>
+              </div>
+
+              <div className="backup-section">
+                <div className="backup-import-card">
+                  <div className="backup-card-head">
+                    <HardDriveUpload size={22} />
+                    <div>
+                      <h3>从备份文件恢复</h3>
+                      <p>选择之前导出的 JSON 备份文件，系统将校验数据并展示差异摘要，确认无误后再覆盖当前数据。</p>
+                    </div>
+                  </div>
+                  <label className="backup-file-label">
+                    <input
+                      ref={backupFileInputRef}
+                      type="file"
+                      accept="application/json,.json"
+                      onChange={handleBackupFileSelect}
+                      style={{ display: 'none' }}
+                    />
+                    <Upload size={16} />
+                    {backupFileName ? backupFileName : '选择 JSON 备份文件'}
+                  </label>
+                </div>
+
+                {backupFatalError && (
+                  <div className="backup-error-banner">
+                    <AlertOctagon size={18} />
+                    <span>{backupFatalError}</span>
+                  </div>
+                )}
+
+                {backupMeta && !backupFatalError && (
+                  <div className="backup-meta">
+                    <span className="backup-meta-label">备份来源：</span>
+                    <span>{backupMeta.domain || appConfig.domain}</span>
+                    {backupMeta.exportedAt && (
+                      <>
+                        <span className="backup-meta-sep">·</span>
+                        <span className="backup-meta-label">导出时间：</span>
+                        <span>{new Date(backupMeta.exportedAt).toLocaleString('zh-CN')}</span>
+                      </>
+                    )}
+                    {typeof backupMeta.recordCount === 'number' && (
+                      <>
+                        <span className="backup-meta-sep">·</span>
+                        <span className="backup-meta-label">记录数：</span>
+                        <span>{backupMeta.recordCount}</span>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {backupValidationResults.length > 0 && (
+                  <div className="backup-stats">
+                    <div className="backup-stat-card ok">
+                      <span className="backup-stat-label">有效记录</span>
+                      <span className="backup-stat-value">{backupStats.valid}</span>
+                    </div>
+                    <div className="backup-stat-card error">
+                      <span className="backup-stat-label">无效记录</span>
+                      <span className="backup-stat-value">{backupStats.invalid}</span>
+                    </div>
+                    <div className="backup-stat-card warning">
+                      <span className="backup-stat-label">含警告</span>
+                      <span className="backup-stat-value">{backupStats.withWarnings}</span>
+                    </div>
+                    <div className="backup-stat-card info">
+                      <span className="backup-stat-label">当前数据</span>
+                      <span className="backup-stat-value">{records.length}</span>
+                    </div>
+                  </div>
+                )}
+
+                {backupDiff && (
+                  <div className="backup-diff-section">
+                    <div className="backup-diff-header">
+                      <CheckCheck size={16} />
+                      <h3>差异摘要</h3>
+                    </div>
+                    <div className="backup-diff-grid">
+                      <div className="backup-diff-card added">
+                        <div className="diff-icon">
+                          <Plus size={18} />
+                        </div>
+                        <div className="diff-content">
+                          <span className="diff-label">新增记录</span>
+                          <span className="diff-count">{backupDiff.added.length}</span>
+                        </div>
+                      </div>
+                      <div className="backup-diff-card updated">
+                        <div className="diff-icon">
+                          <Edit2 size={18} />
+                        </div>
+                        <div className="diff-content">
+                          <span className="diff-label">变更记录</span>
+                          <span className="diff-count">{backupDiff.updated.length}</span>
+                        </div>
+                      </div>
+                      <div className="backup-diff-card unchanged">
+                        <div className="diff-icon">
+                          <CheckCircle2 size={18} />
+                        </div>
+                        <div className="diff-content">
+                          <span className="diff-label">无变化</span>
+                          <span className="diff-count">{backupDiff.unchanged.length}</span>
+                        </div>
+                      </div>
+                      <div className="backup-diff-card removed">
+                        <div className="diff-icon">
+                          <Trash2 size={18} />
+                        </div>
+                        <div className="diff-content">
+                          <span className="diff-label">将删除</span>
+                          <span className="diff-count">{backupDiff.removedIds.length}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {(backupDiff.added.length > 0 || backupDiff.updated.length > 0 || backupDiff.removedIds.length > 0) && (
+                      <div className="backup-diff-details">
+                        {backupDiff.added.length > 0 && (
+                          <div className="diff-detail-group">
+                            <h4>新增（{backupDiff.added.length}）</h4>
+                            <div className="diff-detail-list">
+                              {backupDiff.added.slice(0, 5).map((r) => (
+                                <div key={r.id} className="diff-detail-item added">
+                                  <span className="diff-bed">{r.bed}</span>
+                                  <span className="diff-patient">{r.patient}</span>
+                                  <span className="diff-meta">{r.date} {r.shift} {r.start}-{r.end}</span>
+                                </div>
+                              ))}
+                              {backupDiff.added.length > 5 && (
+                                <div className="diff-more">还有 {backupDiff.added.length - 5} 条新增...</div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {backupDiff.updated.length > 0 && (
+                          <div className="diff-detail-group">
+                            <h4>变更（{backupDiff.updated.length}）</h4>
+                            <div className="diff-detail-list">
+                              {backupDiff.updated.slice(0, 3).map(({ old: o, new: n }) => (
+                                <div key={n.id} className="diff-detail-item updated">
+                                  <div className="diff-row">
+                                    <span className="diff-bed">{o.bed}</span>
+                                    <span className="diff-patient">{o.patient}</span>
+                                    <span className="diff-meta">{o.date} {o.shift} {o.start}-{o.end}</span>
+                                    <span className={'status diff-status ' + statusClass(o.status)}>{o.status}</span>
+                                  </div>
+                                  <ArrowRightLeft size={14} className="diff-arrow" />
+                                  <div className="diff-row">
+                                    <span className="diff-bed">{n.bed}</span>
+                                    <span className="diff-patient">{n.patient}</span>
+                                    <span className="diff-meta">{n.date} {n.shift} {n.start}-{n.end}</span>
+                                    <span className={'status diff-status ' + statusClass(n.status)}>{n.status}</span>
+                                  </div>
+                                </div>
+                              ))}
+                              {backupDiff.updated.length > 3 && (
+                                <div className="diff-more">还有 {backupDiff.updated.length - 3} 条变更...</div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {backupDiff.removedIds.length > 0 && (
+                          <div className="diff-detail-group">
+                            <h4>将被删除（{backupDiff.removedIds.length}）</h4>
+                            <div className="diff-detail-list">
+                              {records
+                                .filter(r => backupDiff.removedIds.includes(r.id))
+                                .slice(0, 5)
+                                .map((r) => (
+                                  <div key={r.id} className="diff-detail-item removed">
+                                    <span className="diff-bed">{r.bed}</span>
+                                    <span className="diff-patient">{r.patient}</span>
+                                    <span className="diff-meta">{r.date} {r.shift} {r.start}-{r.end}</span>
+                                    <span className={'status diff-status ' + statusClass(r.status)}>{r.status}</span>
+                                  </div>
+                                ))}
+                              {backupDiff.removedIds.length > 5 && (
+                                <div className="diff-more">还有 {backupDiff.removedIds.length - 5} 条将被删除...</div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {backupValidationResults.length > 0 && (
+                  <div className="backup-validation-section">
+                    <div className="backup-validation-header">
+                      <AlertCircle size={16} />
+                      <h3>校验详情</h3>
+                    </div>
+                    <div className="preview-wrap validation-preview">
+                      <div className="preview-table">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>序号</th>
+                              <th>患者</th>
+                              <th>日期</th>
+                              <th>班次</th>
+                              <th>床位</th>
+                              <th>开始</th>
+                              <th>结束</th>
+                              <th>状态</th>
+                              <th>校验结果</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {backupValidationResults.map((r, idx) => (
+                              <tr key={idx} className={!r.valid ? 'row-error' : (r.warnings.length > 0 ? 'row-warning' : 'row-ok')}>
+                                <td>{idx + 1}</td>
+                                <td className={!String(r.normalized?.patient || '').trim() ? 'cell-bad' : ''}>{r.normalized?.patient || '-'}</td>
+                                <td className={!String(r.normalized?.date || '').trim() || !DATE_REGEX.test(r.normalized?.date || '') ? 'cell-bad' : ''}>{r.normalized?.date || '-'}</td>
+                                <td className={!String(r.normalized?.shift || '').trim() ? 'cell-bad' : ''}>{r.normalized?.shift || '-'}</td>
+                                <td className={!String(r.normalized?.bed || '').trim() ? 'cell-bad' : ''}>{r.normalized?.bed || '-'}</td>
+                                <td className={!String(r.normalized?.start || '').trim() || !isValidTime(r.normalized?.start || '') ? 'cell-bad' : ''}>{r.normalized?.start || '-'}</td>
+                                <td className={!String(r.normalized?.end || '').trim() || !isValidTime(r.normalized?.end || '') || (isValidTime(r.normalized?.start || '') && isValidTime(r.normalized?.end || '') && !((r.normalized?.start || '') < (r.normalized?.end || ''))) ? 'cell-bad' : ''}>{r.normalized?.end || '-'}</td>
+                                <td>{r.normalized?.status || '-'}</td>
+                                <td className="validate-cell">
+                                  {r.errors.map((e, i) => <span key={'e' + i} className="tag tag-error"><AlertCircle size={12} />{e}</span>)}
+                                  {r.warnings.map((w, i) => <span key={'w' + i} className="tag tag-warn"><AlertTriangle size={12} />{w}</span>)}
+                                  {r.valid && r.warnings.length === 0 && <span className="tag tag-ok"><CheckCircle2 size={12} />有效</span>}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="secondary" onClick={handleBackupClose}>取消</button>
+              <button
+                type="button"
+                className="primary"
+                onClick={handleConfirmRestore}
+                disabled={backupValidRecords.length === 0 || backupStats.invalid > 0}
+                title={backupStats.invalid > 0 ? '存在无效记录，无法恢复' : ''}
+              >
+                <Save size={16} />确认恢复并覆盖 {backupValidRecords.length} 条
               </button>
             </div>
           </div>
