@@ -375,14 +375,21 @@ function generateBedRecommendations(target, records) {
       const otherEnd = timeToMinutes(otherRange.end);
       if (otherEnd - otherStart < durationMin) continue;
 
-      const sameBedShiftRecords = records.filter(
-        (r) => r.date === target.date && r.bed === bed && r.shift === otherShift && r.id !== target.id
-      );
-      const suggestedStart = Math.max(otherStart, targetStart);
-      const suggestedEnd = suggestedStart + durationMin;
-      if (suggestedEnd <= otherEnd) {
-        const hasConflict = sameBedShiftRecords.some(
-          (r) => minutesToTime(suggestedStart) < r.end && minutesToTime(suggestedEnd) > r.start
+      const allGapsOnBed = findGapsOnBed(bed, target.date, records, durationMin, target.id);
+      for (const gap of allGapsOnBed) {
+        const gapIntersectStart = Math.max(gap.start, otherStart);
+        const gapIntersectEnd = Math.min(gap.end, otherEnd);
+        if (gapIntersectEnd - gapIntersectStart < durationMin) continue;
+
+        const suggestedStart = gapIntersectStart;
+        const suggestedEnd = suggestedStart + durationMin;
+        if (suggestedEnd > otherEnd) continue;
+
+        const allSameBedRecords = records.filter(
+          (r) => r.date === target.date && r.bed === bed && r.id !== target.id
+        );
+        const hasConflict = allSameBedRecords.some(
+          (r) => suggestedStart < timeToMinutes(r.end) && suggestedEnd > timeToMinutes(r.start)
         );
         if (!hasConflict) {
           recs.push({
@@ -394,6 +401,7 @@ function generateBedRecommendations(target, records) {
             reason: `${bed} 可调整至「${otherShift}」班次，时间段 ${minutesToTime(suggestedStart)}-${minutesToTime(suggestedEnd)} 空闲`,
             score: 55
           });
+          break;
         }
       }
     }
