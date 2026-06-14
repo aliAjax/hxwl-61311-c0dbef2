@@ -565,15 +565,229 @@ function priorityRank(value) {
   return { 危急: 0, 加急: 1, 常规: 2, 高: 0, 中: 1, 低: 2 }[value] ?? 9;
 }
 
-function hasOverlap(target, records) {
-  if (!target.bed || !target.date || !target.start || !target.end) return false;
-  return records.some((item) => item.id !== target.id && item.bed === target.bed && item.date === target.date && target.start < item.end && target.end > item.start);
+function normalizeDate(text) {
+  if (!text) return '';
+  const t = String(text).trim();
+  const m = t.match(DATE_REGEX);
+  if (m) {
+    const y = m[1];
+    const mo = String(m[2]).padStart(2, '0');
+    const d = String(m[3]).padStart(2, '0');
+    return `${y}-${mo}-${d}`;
+  }
+  return t;
+}
+
+function isValidTime(text) {
+  if (!text) return false;
+  return TIME_REGEX.test(String(text).trim());
+}
+
+function normalizeTime(text) {
+  if (!text) return '';
+  const t = String(text).trim();
+  const m = t.match(TIME_REGEX);
+  if (m) {
+    return `${String(m[1]).padStart(2, '0')}:${m[2]}`;
+  }
+  return t;
 }
 
 function timeToMinutes(timeStr) {
   if (!timeStr) return 0;
   const [h, m] = timeStr.split(':').map(Number);
   return h * 60 + m;
+}
+
+function hasOverlap(target, records) {
+  if (!target.bed || !target.date || !target.start || !target.end) return false;
+  return records.some((item) => item.id !== target.id && item.bed === target.bed && item.date === target.date && target.start < item.end && target.end > item.start);
+}
+
+const RULE_SEVERITY = {
+  ERROR: 'error',
+  WARNING: 'warning'
+};
+
+const RULE_IDS = {
+  BED_TIME_OVERLAP: 'bed_time_overlap',
+  END_BEFORE_START: 'end_before_start',
+  PATIENT_SAME_DAY_DUPLICATE: 'patient_same_day_duplicate',
+  CLEANING_BED_REASSIGNED: 'cleaning_bed_reassigned',
+  NIGHT_SHIFT_CROSS_DATE: 'night_shift_cross_date'
+};
+
+const SCHEDULING_RULES = [
+  {
+    id: RULE_IDS.BED_TIME_OVERLAP,
+    title: '同床位时间重叠',
+    description: '同一床位同一日期，两个安排的时间段不得重叠',
+    severity: RULE_SEVERITY.ERROR,
+    enabled: true,
+    check: (target, records) => {
+      if (!target.bed || !target.date || !target.start || !target.end) return null;
+      const overlapped = records.filter((item) =>
+        item.id !== target.id &&
+        item.bed === target.bed &&
+        item.date === target.date &&
+        target.start < item.end &&
+        target.end > item.start
+      );
+      if (overlapped.length === 0) return null;
+      const names = overlapped.map((o) => `${o.patient}(${o.start}-${o.end})`).join('、');
+      return {
+        message: `与 ${names} 的时间段重叠`,
+        detail: `床位 ${target.bed} 在 ${target.date} 的 ${target.start}-${target.end} 已被占用`
+      };
+    }
+  },
+  {
+    id: RULE_IDS.END_BEFORE_START,
+    title: '结束时间早于开始时间',
+    description: '结束时间必须晚于开始时间',
+    severity: RULE_SEVERITY.ERROR,
+    enabled: true,
+    check: (target) => {
+      if (!target.start || !target.end) return null;
+      if (!isValidTime(target.start) || !isValidTime(target.end)) return null;
+      const startMin = timeToMinutes(target.start);
+      const endMin = timeToMinutes(target.end);
+      if (endMin <= startMin) {
+        return {
+          message: `结束时间 ${target.end} 不晚于开始时间 ${target.start}`,
+          detail: '请确保透析结束时间晚于预计开始时间'
+        };
+      }
+      return null;
+    }
+  },
+  {
+    id: RULE_IDS.PATIENT_SAME_DAY_DUPLICATE,
+    title: '同一患者同日重复安排',
+    description: '同一患者同一日期不应安排多次透析',
+    severity: RULE_SEVERITY.WARNING,
+    enabled: true,
+    check: (target, records) => {
+      if (!target.patient || !target.date) return null;
+      const patient = String(target.patient).trim();
+      const duplicates = records.filter((item) =>
+        item.id !== target.id &&
+        String(item.patient).trim() === patient &&
+        item.date === target.date
+      );
+      if (duplicates.length === 0) return null;
+      const shifts = duplicates.map((d) => `${d.shift} ${d.bed}(${d.start}-${d.end})`).join('、');
+      return {
+        message: `${patient} 在 ${target.date} 已有安排：${shifts}`,
+        detail: '同一天内同一患者通常只需安排一次透析，请确认是否需要重复安排'
+      };
+    }
+  },
+  {
+    id: RULE_IDS.CLEANING_BED_REASSIGNED,
+    title: '清洁中床位被继续安排',
+    description: '状态为「清洁中」的床位在下一安排开始前应有足够清洁时间',
+    severity: RULE_SEVERITY.WARNING,
+    enabled: true,
+    check: (target, records) => {
+      if (!target.bed || !target.date || !target.start) return null;
+      const cleaningRecords = records.filter((item) =>
+        item.id !== target.id &&
+        item.bed === target.bed &&
+        item.date === target.date &&
+        item.status === '清洁中'
+      );
+      if (cleaningRecords.length === 0) return null;
+      const targetStart = timeToMinutes(target.start);
+      const conflicts = cleaningRecords.filter((cr) => {
+        if (!cr.end) return true;
+        const crEnd = timeToMinutes(cr.end);
+        return targetStart < crEnd + 30;
+      });
+      if (conflicts.length === 0) return null;
+      const info = conflicts.map((c) => `${c.patient}(结束${c.end})`).join('、');
+      return {
+        message: `床位 ${target.bed} 正在由 ${info} 清洁，距下次安排清洁时间不足 30 分钟`,
+        detail: '建议为床位清洁预留至少 30 分钟缓冲时间'
+      };
+    }
+  },
+  {
+    id: RULE_IDS.NIGHT_SHIFT_CROSS_DATE,
+    title: '夜间班跨日期',
+    description: '夜间班若结束时间早于开始时间表示跨日，需特别标注',
+    severity: RULE_SEVERITY.WARNING,
+    enabled: true,
+    check: (target) => {
+      if (target.shift !== '夜间') return null;
+      if (!target.start || !target.end) return null;
+      if (!isValidTime(target.start) || !isValidTime(target.end)) return null;
+      const startMin = timeToMinutes(target.start);
+      const endMin = timeToMinutes(target.end);
+      if (endMin <= startMin) {
+        return {
+          message: `夜间班 ${target.start}-${target.end} 跨越至次日`,
+          detail: '系统按当日处理，实际跨日透析请注意日期记录'
+        };
+      }
+      if (startMin < timeToMinutes('18:00')) {
+        return {
+          message: `夜间班开始时间 ${target.start} 早于 18:00`,
+          detail: '夜间班通常从 18:00 开始，请确认班次与时间是否匹配'
+        };
+      }
+      return null;
+    }
+  }
+];
+
+function evaluateRules(target, records, options = {}) {
+  const { excludeRules = [], onlyEnabled = true } = options;
+  const violations = [];
+  for (const rule of SCHEDULING_RULES) {
+    if (onlyEnabled && !rule.enabled) continue;
+    if (excludeRules.includes(rule.id)) continue;
+    const result = rule.check(target, records);
+    if (result) {
+      violations.push({
+        ruleId: rule.id,
+        severity: rule.severity,
+        title: rule.title,
+        message: result.message,
+        detail: result.detail || ''
+      });
+    }
+  }
+  return violations;
+}
+
+function hasRuleViolations(target, records, severityFilter) {
+  const violations = evaluateRules(target, records);
+  if (severityFilter) {
+    return violations.some((v) => v.severity === severityFilter);
+  }
+  return violations.length > 0;
+}
+
+function hasSevereViolations(target, records) {
+  return hasRuleViolations(target, records, RULE_SEVERITY.ERROR);
+}
+
+function getViolationSummary(violations) {
+  if (!violations || violations.length === 0) return { errors: 0, warnings: 0, titles: [] };
+  const errors = violations.filter((v) => v.severity === RULE_SEVERITY.ERROR).length;
+  const warnings = violations.filter((v) => v.severity === RULE_SEVERITY.WARNING).length;
+  const titles = violations.map((v) => v.title);
+  return { errors, warnings, titles };
+}
+
+function aggregateRecordsViolations(records) {
+  const map = new Map();
+  for (const rec of records) {
+    const violations = evaluateRules(rec, records);
+    if (violations.length > 0) map.set(rec.id, violations);
+  }
+  return map;
 }
 
 const SHIFT_TIME_RANGES = {
@@ -904,34 +1118,6 @@ function matchField(header) {
   return null;
 }
 
-function normalizeDate(text) {
-  if (!text) return '';
-  const t = String(text).trim();
-  const m = t.match(DATE_REGEX);
-  if (m) {
-    const y = m[1];
-    const mo = String(m[2]).padStart(2, '0');
-    const d = String(m[3]).padStart(2, '0');
-    return `${y}-${mo}-${d}`;
-  }
-  return t;
-}
-
-function isValidTime(text) {
-  if (!text) return false;
-  return TIME_REGEX.test(String(text).trim());
-}
-
-function normalizeTime(text) {
-  if (!text) return '';
-  const t = String(text).trim();
-  const m = t.match(TIME_REGEX);
-  if (m) {
-    return `${String(m[1]).padStart(2, '0')}:${m[2]}`;
-  }
-  return t;
-}
-
 function parsePasteText(text) {
   const rawLines = String(text || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   if (rawLines.length === 0) return [];
@@ -1239,6 +1425,39 @@ function App() {
 
   function addRecord(event) {
     event.preventDefault();
+    if (!form.patient || !form.date || !form.shift || !form.bed || !form.start || !form.end) {
+      alert('请填写患者、日期、班次、床位、开始时间和结束时间');
+      return;
+    }
+    if (!DATE_REGEX.test(normalizeDate(form.date))) {
+      alert('日期格式错误，应为 YYYY-MM-DD');
+      return;
+    }
+    if (!isValidTime(form.start) || !isValidTime(form.end)) {
+      alert('时间格式错误，应为 HH:MM');
+      return;
+    }
+    if (!(normalizeTime(form.start) < normalizeTime(form.end))) {
+      alert('开始时间须早于结束时间');
+      return;
+    }
+
+    const target = editing ? { ...form, id: editing.id } : { ...form, id: uid() };
+    const violations = evaluateRules(target, records);
+    const errors = violations.filter((v) => v.severity === RULE_SEVERITY.ERROR);
+    const warnings = violations.filter((v) => v.severity === RULE_SEVERITY.WARNING);
+
+    if (errors.length > 0) {
+      const msg = errors.map((e, i) => `${i + 1}. ${e.title}：${e.message}`).join('\n');
+      alert(`存在 ${errors.length} 项规则错误，无法保存：\n\n${msg}\n\n请修正后再提交。`);
+      return;
+    }
+    if (warnings.length > 0) {
+      const msg = warnings.map((w, i) => `${i + 1}. ${w.title}：${w.message}`).join('\n');
+      const ok = confirm(`存在 ${warnings.length} 项合规警告：\n\n${msg}\n\n是否仍然继续保存？`);
+      if (!ok) return;
+    }
+
     if (editing) {
       const updated = records.map((item) => item.id === editing.id ? {
         ...item,
@@ -1307,11 +1526,42 @@ function App() {
     });
   }
 
+  const recordViolationsMap = useMemo(() => aggregateRecordsViolations(records), [records]);
+
+  function getRecordViolations(item) {
+    if (!item || !item.id) return [];
+    return recordViolationsMap.get(item.id) || evaluateRules(item, records);
+  }
+
+  function recordHasErrors(item) {
+    const v = getRecordViolations(item);
+    return v.some((x) => x.severity === RULE_SEVERITY.ERROR);
+  }
+
+  function recordHasAnyViolation(item) {
+    return getRecordViolations(item).length > 0;
+  }
+
+  function violationSummaryText(item) {
+    const vs = getRecordViolations(item);
+    if (vs.length === 0) return '排班合规';
+    return vs.map((v) => `[${v.severity === RULE_SEVERITY.ERROR ? '错误' : '警告'}] ${v.message}`).join('；');
+  }
+
+  const formViolations = useMemo(() => {
+    if (!form.bed || !form.date || !form.start || !form.end) return [];
+    const target = editing ? { ...form, id: editing.id } : { ...form, id: '_new_' };
+    return evaluateRules(target, records);
+  }, [form, records, editing]);
+
   const formHasConflict = useMemo(() => {
     if (!form.bed || !form.date || !form.start || !form.end) return false;
     const target = editing ? { ...form, id: editing.id } : { ...form, id: '_new_' };
     return hasOverlap(target, records);
   }, [form, records, editing]);
+
+  const formHasSevereViolation = useMemo(() => formViolations.some((v) => v.severity === RULE_SEVERITY.ERROR), [formViolations]);
+  const formHasWarning = useMemo(() => formViolations.some((v) => v.severity === RULE_SEVERITY.WARNING), [formViolations]);
 
   const smartRecommendations = useMemo(() => {
     if (!formHasConflict) return [];
@@ -1376,19 +1626,27 @@ function App() {
     for (const status of appConfig.statuses) {
       counts[status] = todayRecords.filter((item) => item.status === status).length;
     }
-    const conflictRecords = todayRecords.filter((item) => item.conflict || hasOverlap(item, records));
+    const conflictRecords = todayRecords.filter((item) => recordHasAnyViolation(item) || item.conflict);
     const conflictBeds = new Set(conflictRecords.map((item) => item.bed));
     counts['存在冲突'] = conflictBeds.size;
 
+    const ruleErrorCount = todayRecords.filter((item) => recordHasErrors(item)).length;
+    const ruleWarningCount = todayRecords.filter((item) => {
+      const vs = getRecordViolations(item);
+      return vs.some((v) => v.severity === RULE_SEVERITY.WARNING) && !vs.some((v) => v.severity === RULE_SEVERITY.ERROR);
+    }).length;
+    counts['规则错误'] = ruleErrorCount;
+    counts['规则警告'] = ruleWarningCount;
+
     const focusRecords = todayRecords.filter((item) => {
-      if (item.conflict || hasOverlap(item, records)) return true;
+      if (recordHasAnyViolation(item) || item.conflict) return true;
       if (item.status === '透析中') return true;
       if (item.status === '清洁中') return true;
       return false;
     });
 
     return { counts, conflictRecords, focusRecords, conflictBeds: Array.from(conflictBeds) };
-  }, [todayRecords, records]);
+  }, [todayRecords, records, recordViolationsMap]);
 
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState(false);
@@ -1402,12 +1660,16 @@ function App() {
     for (const status of appConfig.statuses) {
       lines.push(`${status}：${counts[status]} 床`);
     }
-    lines.push(`存在冲突：${counts['存在冲突']} 床`);
+    lines.push(`存在冲突：${counts['存在冲突']} 床（规则错误 ${counts['规则错误'] || 0}、规则警告 ${counts['规则警告'] || 0}）`);
     lines.push('');
     if (focusRecords.length > 0) {
       lines.push('— 需重点交接 —');
       focusRecords.forEach((item, i) => {
-        lines.push(`${i + 1}. ${item.bed} · ${item.patient} · ${item.shift} ${item.start}-${item.end} · ${item.status}${(item.conflict || hasOverlap(item, records)) ? ' [冲突]' : ''}`);
+        const vs = getRecordViolations(item);
+        const tag = vs.length > 0
+          ? ` [${vs.filter(v => v.severity === RULE_SEVERITY.ERROR).length}错${vs.filter(v => v.severity === RULE_SEVERITY.WARNING).length}警]`
+          : (item.conflict ? ' [冲突]' : '');
+        lines.push(`${i + 1}. ${item.bed} · ${item.patient} · ${item.shift} ${item.start}-${item.end} · ${item.status}${tag}`);
       });
     } else {
       lines.push('— 无需重点交接记录 —');
@@ -1525,8 +1787,8 @@ function App() {
   }, [filteredRecords, timelineDate, timelineRange]);
 
   const timelineConflictRecords = useMemo(() => {
-    return timelineRecords.filter((item) => hasOverlap(item, records));
-  }, [timelineRecords, records]);
+    return timelineRecords.filter((item) => recordHasAnyViolation(item));
+  }, [timelineRecords, recordViolationsMap]);
 
   const timelineHours = useMemo(() => {
     const hours = [];
@@ -1551,12 +1813,17 @@ function App() {
         const rangeStart = timeToMinutes(timelineRange.start);
         const left = ((startMin - rangeStart) / timelineTotalMinutes) * 100;
         const width = Math.max(0, ((endMin - startMin) / timelineTotalMinutes) * 100);
-        const hasOverlapFlag = hasOverlap(item, records);
+        const violations = getRecordViolations(item);
+        const hasSevere = violations.some((v) => v.severity === RULE_SEVERITY.ERROR);
+        const hasWarning = violations.some((v) => v.severity === RULE_SEVERITY.WARNING);
         return {
           ...item,
           left,
           width,
-          hasOverlap: hasOverlapFlag,
+          hasOverlap: hasSevere || hasWarning,
+          hasSevereViolation: hasSevere,
+          hasWarningViolation: hasWarning,
+          violations,
           row: 0
         };
       });
@@ -1741,9 +2008,12 @@ function App() {
               <h4>需重点交接</h4>
               <div className="handover-focus-list">
                 {handoverSummary.focusRecords.map((item) => {
-                  const isConflict = item.conflict || hasOverlap(item, records);
+                  const violations = getRecordViolations(item);
+                  const hasErrors = violations.some((v) => v.severity === RULE_SEVERITY.ERROR);
+                  const hasWarnings = violations.some((v) => v.severity === RULE_SEVERITY.WARNING);
+                  const isConflict = item.conflict || violations.length > 0;
                   return (
-                    <div className={'handover-focus-item' + (isConflict ? ' conflict' : '')} key={item.id} onClick={() => setSelected(item)}>
+                    <div className={'handover-focus-item' + (hasErrors ? ' conflict' : '') + (hasWarnings && !hasErrors ? ' warn' : '')} key={item.id} onClick={() => setSelected(item)}>
                       <div className="handover-focus-main">
                         <span className="handover-focus-bed">{item.bed}</span>
                         <span className="handover-focus-patient">{item.patient}</span>
@@ -1751,7 +2021,9 @@ function App() {
                       </div>
                       <div className="handover-focus-meta">
                         <span>{item.shift} {item.start}-{item.end}</span>
-                        {isConflict && <span className="handover-conflict-tag"><AlertTriangle size={12} />冲突</span>}
+                        {hasErrors && <span className="handover-conflict-tag error"><AlertCircle size={12} />{violations.filter(v => v.severity === RULE_SEVERITY.ERROR).length} 错误</span>}
+                        {hasWarnings && <span className="handover-conflict-tag warn"><AlertTriangle size={12} />{violations.filter(v => v.severity === RULE_SEVERITY.WARNING).length} 警告</span>}
+                        {item.conflict && !violations.length && <span className="handover-conflict-tag"><AlertTriangle size={12} />冲突</span>}
                       </div>
                     </div>
                   );
@@ -1793,6 +2065,44 @@ function App() {
                 </select>
               </label>
             </div>
+
+            {formViolations.length > 0 && (
+              <div className="form-rule-hints">
+                {formHasSevereViolation && (
+                  <div className="rule-hint-group error">
+                    <div className="rule-hint-head">
+                      <AlertCircle size={14} />
+                      <span>规则错误（{formViolations.filter(v => v.severity === RULE_SEVERITY.ERROR).length}）</span>
+                    </div>
+                    <ul>
+                      {formViolations.filter(v => v.severity === RULE_SEVERITY.ERROR).map((v, i) => (
+                        <li key={i}>
+                          <strong>{v.title}：</strong>{v.message}
+                          {v.detail && <em>{v.detail}</em>}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {formHasWarning && (
+                  <div className="rule-hint-group warn">
+                    <div className="rule-hint-head">
+                      <AlertTriangle size={14} />
+                      <span>合规警告（{formViolations.filter(v => v.severity === RULE_SEVERITY.WARNING).length}）</span>
+                    </div>
+                    <ul>
+                      {formViolations.filter(v => v.severity === RULE_SEVERITY.WARNING).map((v, i) => (
+                        <li key={i}>
+                          <strong>{v.title}：</strong>{v.message}
+                          {v.detail && <em>{v.detail}</em>}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="form-actions">
               <button className="primary" type="submit">{editing ? <><Save size={18} />保存</> : <><Plus size={18} />新增</>}</button>
               {editing ? (
@@ -2180,28 +2490,39 @@ function App() {
             </div>
           ) : viewMode === 'list' ? (
             <div className="records">
-              {filteredRecords.map((item) => (
-                <article className={'record ' + (item.conflict || hasOverlap(item, records) ? 'conflict' : '')} key={item.id} onClick={() => setSelected(item)}>
-                  <div className="record-head">
-                    <div>
-                      <h3>{`${item.bed} · ${item.patient}`}</h3>
-                      <p>{`${item.date} ${item.shift} · ${item.start}-${item.end}`}</p>
+              {filteredRecords.map((item) => {
+                const violations = getRecordViolations(item);
+                const hasErrors = violations.some((v) => v.severity === RULE_SEVERITY.ERROR);
+                const hasWarnings = violations.some((v) => v.severity === RULE_SEVERITY.WARNING);
+                const isBad = hasErrors || item.conflict;
+                return (
+                  <article className={'record ' + (isBad ? 'conflict' : '') + (hasWarnings && !isBad ? 'warning' : '')} key={item.id} onClick={() => setSelected(item)}>
+                    <div className="record-head">
+                      <div>
+                        <h3>{`${item.bed} · ${item.patient}`}</h3>
+                        <p>{`${item.date} ${item.shift} · ${item.start}-${item.end}`}</p>
+                      </div>
+                      <span className={'status ' + statusClass(item.status)}>{item.status}</span>
                     </div>
-                    <span className={'status ' + statusClass(item.status)}>{item.status}</span>
-                  </div>
-                  <p className="record-detail">{hasOverlap(item, records) ? '存在床位时间重叠，请调整安排' : '床位时间正常'}</p>
-                  {(item.conflict || hasOverlap(item, records)) && <div className="warning"><AlertTriangle size={15} />发现冲突</div>}
-                  <div className="actions" onClick={(event) => event.stopPropagation()}>
-                    <button type="button" onClick={() => startEdit(item)}><Edit2 size={14} />编辑</button>
-                    {appConfig.statuses.map((status) => (
-                      <button key={status} type="button" onClick={() => updateStatus(item.id, status)}>{status}</button>
-                    ))}
-                    {appConfig.action === 'copyRecipe' && <button type="button" onClick={() => duplicateRecord(item)}><RotateCcw size={14} />复制</button>}
-                    {appConfig.chart && <button type="button" onClick={() => addTemperature(item)}>加温度</button>}
-                    <button className="ghost-danger" type="button" onClick={() => removeRecord(item.id)}><Trash2 size={14} /></button>
-                  </div>
-                </article>
-              ))}
+                    <p className="record-detail">{violationSummaryText(item)}</p>
+                    {(isBad || hasWarnings) && (
+                      <div className="warning">
+                        {hasErrors ? <AlertCircle size={15} /> : <AlertTriangle size={15} />}
+                        {hasErrors ? `发现 ${violations.filter(v => v.severity === RULE_SEVERITY.ERROR).length} 项规则错误` : `发现 ${violations.filter(v => v.severity === RULE_SEVERITY.WARNING).length} 项合规警告`}
+                      </div>
+                    )}
+                    <div className="actions" onClick={(event) => event.stopPropagation()}>
+                      <button type="button" onClick={() => startEdit(item)}><Edit2 size={14} />编辑</button>
+                      {appConfig.statuses.map((status) => (
+                        <button key={status} type="button" onClick={() => updateStatus(item.id, status)}>{status}</button>
+                      ))}
+                      {appConfig.action === 'copyRecipe' && <button type="button" onClick={() => duplicateRecord(item)}><RotateCcw size={14} />复制</button>}
+                      {appConfig.chart && <button type="button" onClick={() => addTemperature(item)}>加温度</button>}
+                      <button className="ghost-danger" type="button" onClick={() => removeRecord(item.id)}><Trash2 size={14} /></button>
+                    </div>
+                  </article>
+                );
+              })}
             </div>
           ) : viewMode === 'calendar' ? (
             <div className="calendar-wrap">
@@ -2231,11 +2552,14 @@ function App() {
                             <span className="cell-empty">空闲</span>
                           ) : (
                             cellItems.map((item) => {
-                              const isConflict = item.conflict || hasOverlap(item, records);
+                              const violations = getRecordViolations(item);
+                              const hasErrors = violations.some((v) => v.severity === RULE_SEVERITY.ERROR);
+                              const hasWarnings = violations.some((v) => v.severity === RULE_SEVERITY.WARNING);
+                              const isConflict = hasErrors || item.conflict;
                               return (
                                 <div
                                   key={item.id}
-                                  className={'cal-item ' + (isConflict ? 'conflict' : '')}
+                                  className={'cal-item ' + (isConflict ? 'conflict' : '') + (hasWarnings && !isConflict ? ' warning' : '')}
                                   onClick={() => setSelected(item)}
                                 >
                                   <div className="cal-item-head">
@@ -2246,7 +2570,8 @@ function App() {
                                     <span className="cal-shift">{item.shift}</span>
                                     <span className="cal-time">{item.start}-{item.end}</span>
                                   </div>
-                                  {isConflict && <div className="cal-warning"><AlertTriangle size={12} />冲突</div>}
+                                  {isConflict && <div className="cal-warning"><AlertCircle size={12} />{violations.filter(v => v.severity === RULE_SEVERITY.ERROR).length} 错</div>}
+                                  {hasWarnings && !isConflict && <div className="cal-warning warn"><AlertTriangle size={12} />{violations.filter(v => v.severity === RULE_SEVERITY.WARNING).length} 警</div>}
                                 </div>
                               );
                             })
@@ -2311,27 +2636,42 @@ function App() {
                               ))}
                             </div>
                             <div className="timeline-items">
-                              {bedData.items.map((item) => (
-                                <div
-                                  key={item.id}
-                                  className={'timeline-block ' + statusClass(item.status) + (item.hasOverlap ? ' conflict' : '')}
-                                  style={{
-                                    left: `${item.left}%`,
-                                    width: `${item.width}%`,
-                                    top: `${item.row * 28 + 4}px`
-                                  }}
-                                  onClick={() => setSelected(item)}
-                                  title={`${item.patient} · ${item.start}-${item.end}${item.hasOverlap ? ' · 时间冲突' : ''}`}
-                                >
-                                  <span className="timeline-block-patient">{item.patient}</span>
-                                  <span className="timeline-block-time">{item.start}-{item.end}</span>
-                                  {item.hasOverlap && (
-                                    <span className="timeline-conflict-badge">
-                                      <AlertTriangle size={10} />
-                                    </span>
-                                  )}
-                                </div>
-                              ))}
+                              {bedData.items.map((item) => {
+                                const vs = item.violations || [];
+                                const errCount = vs.filter((v) => v.severity === RULE_SEVERITY.ERROR).length;
+                                const warnCount = vs.filter((v) => v.severity === RULE_SEVERITY.WARNING).length;
+                                const titleParts = [`${item.patient} · ${item.start}-${item.end}`];
+                                if (errCount) titleParts.push(`· ${errCount} 错`);
+                                if (warnCount) titleParts.push(`· ${warnCount} 警`);
+                                return (
+                                  <div
+                                    key={item.id}
+                                    className={'timeline-block ' + statusClass(item.status)
+                                      + (item.hasSevereViolation ? ' conflict' : '')
+                                      + (item.hasWarningViolation && !item.hasSevereViolation ? ' warning' : '')}
+                                    style={{
+                                      left: `${item.left}%`,
+                                      width: `${item.width}%`,
+                                      top: `${item.row * 28 + 4}px`
+                                    }}
+                                    onClick={() => setSelected(item)}
+                                    title={titleParts.join(' ')}
+                                  >
+                                    <span className="timeline-block-patient">{item.patient}</span>
+                                    <span className="timeline-block-time">{item.start}-${item.end}</span>
+                                    {item.hasSevereViolation && (
+                                      <span className="timeline-conflict-badge error">
+                                        <AlertCircle size={10} />
+                                      </span>
+                                    )}
+                                    {item.hasWarningViolation && !item.hasSevereViolation && (
+                                      <span className="timeline-conflict-badge warn">
+                                        <AlertTriangle size={10} />
+                                      </span>
+                                    )}
+                                  </div>
+                                );
+                              })}
                             </div>
                           </div>
                         </div>
@@ -2343,7 +2683,7 @@ function App() {
               {timelineConflictRecords.length > 0 && (
                 <div className="timeline-conflict-summary">
                   <AlertTriangle size={16} />
-                  <span>共发现 {timelineConflictRecords.length} 条时间重叠记录，请点击冲突块查看详情并调整安排。</span>
+                  <span>共发现 {timelineConflictRecords.length} 条排班违规（{timelineConflictRecords.filter(r => recordHasErrors(r)).length} 错 / {timelineConflictRecords.filter(r => { const vs = getRecordViolations(r); return vs.some(v => v.severity === RULE_SEVERITY.WARNING) && !vs.some(v => v.severity === RULE_SEVERITY.ERROR); }).length} 警），请点击色块查看详情并调整安排。</span>
                 </div>
               )}
             </div>
@@ -2456,7 +2796,50 @@ function App() {
             <div className="detail">
               <h3>{`${selected.bed} · ${selected.patient}`}</h3>
               <p>{`${selected.date} ${selected.shift} · ${selected.start}-${selected.end}`}</p>
-              <p>{hasOverlap(selected, records) ? '存在床位时间重叠，请调整安排' : '床位时间正常'}</p>
+              {(() => {
+                const vs = getRecordViolations(selected);
+                if (vs.length === 0) {
+                  return <p className="detail-ok"><CheckCircle2 size={14} />排班合规，无违规项</p>;
+                }
+                const errors = vs.filter(v => v.severity === RULE_SEVERITY.ERROR);
+                const warnings = vs.filter(v => v.severity === RULE_SEVERITY.WARNING);
+                return (
+                  <div className="detail-violations">
+                    {errors.length > 0 && (
+                      <div className="violation-group error">
+                        <div className="violation-group-head">
+                          <AlertCircle size={14} />
+                          <span>规则错误（{errors.length}）</span>
+                        </div>
+                        <ul>
+                          {errors.map((e, i) => (
+                            <li key={i}>
+                              <strong>{e.title}：</strong>{e.message}
+                              {e.detail && <em>{e.detail}</em>}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {warnings.length > 0 && (
+                      <div className="violation-group warn">
+                        <div className="violation-group-head">
+                          <AlertTriangle size={14} />
+                          <span>合规警告（{warnings.length}）</span>
+                        </div>
+                        <ul>
+                          {warnings.map((w, i) => (
+                            <li key={i}>
+                              <strong>{w.title}：</strong>{w.message}
+                              {w.detail && <em>{w.detail}</em>}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
               
               <button
                 type="button"
