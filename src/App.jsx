@@ -1,5 +1,5 @@
 import { useMemo, useState, useCallback } from 'react';
-import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, Upload, FileText, X, AlertCircle, CheckCheck, LayoutGrid, List, ClipboardCopy, Clock } from 'lucide-react';
+import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, Upload, FileText, X, AlertCircle, CheckCheck, LayoutGrid, List, ClipboardCopy, Clock, GitBranch, User, Calendar, Filter, ArrowRightLeft, AlertOctagon, History } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -233,6 +233,109 @@ function statusClass(status) {
   return ['status-a', 'status-b', 'status-c', 'status-d'][index] || 'status-a';
 }
 
+const STATUS_ORDER = { '待到达': 0, '透析中': 1, '清洁中': 2, '已完成': 3 };
+const ABNORMAL_TYPES = {
+  REGRESSION: 'regression',
+  REPEATED: 'repeated',
+  SKIP_CLEANING: 'skip_cleaning'
+};
+
+function analyzeTimeline(timeline) {
+  if (!timeline || timeline.length === 0) {
+    return { steps: [], abnormalities: [] };
+  }
+
+  const normalizedTimeline = timeline.map((step, index) => ({
+    ...step,
+    index,
+    statusOrder: STATUS_ORDER[step.status] ?? -1,
+    abnormalities: []
+  }));
+
+  const abnormalities = [];
+
+  for (let i = 1; i < normalizedTimeline.length; i++) {
+    const current = normalizedTimeline[i];
+    const previous = normalizedTimeline[i - 1];
+
+    if (current.status === previous.status) {
+      const abnormality = {
+        type: ABNORMAL_TYPES.REPEATED,
+        label: '重复点击',
+        description: `重复点击「${current.status}」状态`,
+        stepIndex: i,
+        severity: 'warning'
+      };
+      abnormalities.push(abnormality);
+      current.abnormalities.push(abnormality);
+    }
+
+    if (current.statusOrder < previous.statusOrder && current.statusOrder !== -1 && previous.statusOrder !== -1) {
+      const abnormality = {
+        type: ABNORMAL_TYPES.REGRESSION,
+        label: '状态倒退',
+        description: `从「${previous.status}」倒退至「${current.status}」`,
+        stepIndex: i,
+        severity: 'error'
+      };
+      abnormalities.push(abnormality);
+      current.abnormalities.push(abnormality);
+    }
+
+    if (previous.status === '透析中' && current.status === '已完成') {
+      const abnormality = {
+        type: ABNORMAL_TYPES.SKIP_CLEANING,
+        label: '跳过清洁',
+        description: '从「透析中」直接变为「已完成」，跳过了「清洁中」',
+        stepIndex: i,
+        severity: 'error'
+      };
+      abnormalities.push(abnormality);
+      current.abnormalities.push(abnormality);
+    }
+  }
+
+  return { steps: normalizedTimeline, abnormalities };
+}
+
+function getOperators(records) {
+  const operators = new Set();
+  records.forEach((item) => {
+    (item.timeline || []).forEach((step) => {
+      if (step.by) operators.add(step.by);
+    });
+  });
+  return Array.from(operators).sort();
+}
+
+function filterAuditRecords(records, filters) {
+  return records.filter((item) => {
+    if (filters.operator && filters.operator !== '全部') {
+      const hasOperator = (item.timeline || []).some((step) => step.by === filters.operator);
+      if (!hasOperator) return false;
+    }
+
+    if (filters.status && filters.status !== '全部') {
+      const hasStatus = (item.timeline || []).some((step) => step.status === filters.status);
+      if (!hasStatus) return false;
+    }
+
+    if (filters.startDate && item.date && item.date < filters.startDate) {
+      return false;
+    }
+    if (filters.endDate && item.date && item.date > filters.endDate) {
+      return false;
+    }
+
+    if (filters.abnormalOnly) {
+      const { abnormalities } = analyzeTimeline(item.timeline);
+      if (abnormalities.length === 0) return false;
+    }
+
+    return true;
+  });
+}
+
 const TIME_REGEX = /^([01]?[0-9]|2[0-3]):([0-5][0-9])$/;
 const DATE_REGEX = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/;
 
@@ -428,6 +531,16 @@ function App() {
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState('');
   const [parsedPreview, setParsedPreview] = useState([]);
+
+  const [auditViewMode, setAuditViewMode] = useState(false);
+  const [auditFilters, setAuditFilters] = useState({
+    operator: '全部',
+    status: '全部',
+    startDate: '',
+    endDate: '',
+    abnormalOnly: false
+  });
+  const [selectedAuditRecord, setSelectedAuditRecord] = useState(null);
 
   function persist(next) {
     setRecords(next);
@@ -803,6 +916,38 @@ function App() {
     }, {});
   }, [records]);
 
+  const operators = useMemo(() => getOperators(records), [records]);
+
+  const auditRecords = useMemo(() => {
+    return filterAuditRecords(records, auditFilters).map((item) => {
+      const { steps, abnormalities } = analyzeTimeline(item.timeline);
+      return {
+        ...item,
+        analyzedSteps: steps,
+        abnormalities,
+        hasAbnormalities: abnormalities.length > 0,
+        abnormalityCount: abnormalities.length,
+        regressionCount: abnormalities.filter((a) => a.type === ABNORMAL_TYPES.REGRESSION).length,
+        repeatedCount: abnormalities.filter((a) => a.type === ABNORMAL_TYPES.REPEATED).length,
+        skipCleaningCount: abnormalities.filter((a) => a.type === ABNORMAL_TYPES.SKIP_CLEANING).length
+      };
+    }).sort((a, b) => {
+      if (b.hasAbnormalities !== a.hasAbnormalities) {
+        return b.hasAbnormalities - a.hasAbnormalities;
+      }
+      return (b.date || '').localeCompare(a.date || '');
+    });
+  }, [records, auditFilters]);
+
+  const auditStats = useMemo(() => {
+    const total = auditRecords.length;
+    const withAbnormalities = auditRecords.filter((r) => r.hasAbnormalities).length;
+    const regressionCount = auditRecords.reduce((sum, r) => sum + r.regressionCount, 0);
+    const repeatedCount = auditRecords.reduce((sum, r) => sum + r.repeatedCount, 0);
+    const skipCleaningCount = auditRecords.reduce((sum, r) => sum + r.skipCleaningCount, 0);
+    return { total, withAbnormalities, regressionCount, repeatedCount, skipCleaningCount };
+  }, [auditRecords]);
+
   return (
     <main className="shell" style={{ '--accent': appConfig.accent }}>
       <section className="hero">
@@ -932,19 +1077,142 @@ function App() {
               {appConfig.statuses.map((status) => <option key={status}>{status}</option>)}
             </select>
             <div className="view-toggle">
-              <button type="button" className={'toggle-btn ' + (viewMode === 'list' ? 'active' : '')} onClick={() => setViewMode('list')} title="列表视图">
+              <button type="button" className={'toggle-btn ' + (!auditViewMode && viewMode === 'list' ? 'active' : '')} onClick={() => { setAuditViewMode(false); setViewMode('list'); }} title="列表视图">
                 <List size={16} />
               </button>
-              <button type="button" className={'toggle-btn ' + (viewMode === 'calendar' ? 'active' : '')} onClick={() => setViewMode('calendar')} title="日历视图">
+              <button type="button" className={'toggle-btn ' + (!auditViewMode && viewMode === 'calendar' ? 'active' : '')} onClick={() => { setAuditViewMode(false); setViewMode('calendar'); }} title="日历视图">
                 <LayoutGrid size={16} />
               </button>
-              <button type="button" className={'toggle-btn ' + (viewMode === 'timeline' ? 'active' : '')} onClick={() => setViewMode('timeline')} title="时间轴视图">
+              <button type="button" className={'toggle-btn ' + (!auditViewMode && viewMode === 'timeline' ? 'active' : '')} onClick={() => { setAuditViewMode(false); setViewMode('timeline'); }} title="时间轴视图">
                 <Clock size={16} />
+              </button>
+              <button type="button" className={'toggle-btn audit-toggle ' + (auditViewMode ? 'active' : '')} onClick={() => setAuditViewMode(!auditViewMode)} title="状态流转审计">
+                <GitBranch size={16} />
               </button>
             </div>
           </div>
 
-          {viewMode === 'list' ? (
+          {auditViewMode ? (
+            <div className="audit-panel">
+              <div className="audit-toolbar">
+                <div className="audit-filters">
+                  <div className="audit-filter-item">
+                    <label><User size={14} />操作员</label>
+                    <select
+                      value={auditFilters.operator}
+                      onChange={(e) => setAuditFilters({ ...auditFilters, operator: e.target.value })}
+                    >
+                      <option>全部</option>
+                      {operators.map((op) => <option key={op}>{op}</option>)}
+                    </select>
+                  </div>
+                  <div className="audit-filter-item">
+                    <label><Filter size={14} />状态</label>
+                    <select
+                      value={auditFilters.status}
+                      onChange={(e) => setAuditFilters({ ...auditFilters, status: e.target.value })}
+                    >
+                      <option>全部</option>
+                      {appConfig.statuses.map((status) => <option key={status}>{status}</option>)}
+                    </select>
+                  </div>
+                  <div className="audit-filter-item">
+                    <label><Calendar size={14} />开始日期</label>
+                    <input
+                      type="date"
+                      value={auditFilters.startDate}
+                      onChange={(e) => setAuditFilters({ ...auditFilters, startDate: e.target.value })}
+                    />
+                  </div>
+                  <div className="audit-filter-item">
+                    <label><Calendar size={14} />结束日期</label>
+                    <input
+                      type="date"
+                      value={auditFilters.endDate}
+                      onChange={(e) => setAuditFilters({ ...auditFilters, endDate: e.target.value })}
+                    />
+                  </div>
+                  <div className="audit-filter-item audit-abnormal-toggle">
+                    <label className="checkbox-label">
+                      <input
+                        type="checkbox"
+                        checked={auditFilters.abnormalOnly}
+                        onChange={(e) => setAuditFilters({ ...auditFilters, abnormalOnly: e.target.checked })}
+                      />
+                      <AlertOctagon size={14} />仅显示异常
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              <div className="audit-stats">
+                <div className="audit-stat-card">
+                  <span className="audit-stat-label">总记录数</span>
+                  <span className="audit-stat-value">{auditStats.total}</span>
+                </div>
+                <div className="audit-stat-card abnormal">
+                  <span className="audit-stat-label">含异常记录</span>
+                  <span className="audit-stat-value">{auditStats.withAbnormalities}</span>
+                </div>
+                <div className="audit-stat-card error">
+                  <span className="audit-stat-label">状态倒退</span>
+                  <span className="audit-stat-value">{auditStats.regressionCount}</span>
+                </div>
+                <div className="audit-stat-card warning">
+                  <span className="audit-stat-label">重复点击</span>
+                  <span className="audit-stat-value">{auditStats.repeatedCount}</span>
+                </div>
+                <div className="audit-stat-card error">
+                  <span className="audit-stat-label">跳过清洁</span>
+                  <span className="audit-stat-value">{auditStats.skipCleaningCount}</span>
+                </div>
+              </div>
+
+              <div className="audit-list">
+                {auditRecords.length === 0 ? (
+                  <p className="empty">暂无符合条件的记录</p>
+                ) : (
+                  auditRecords.map((item) => (
+                    <article
+                      className={'audit-record ' + (item.hasAbnormalities ? 'has-abnormal' : '')}
+                      key={item.id}
+                      onClick={() => setSelectedAuditRecord(item)}
+                    >
+                      <div className="audit-record-head">
+                        <div className="audit-record-main">
+                          <h3>{`${item.bed} · ${item.patient}`}</h3>
+                          <p>{`${item.date} ${item.shift} · ${item.start}-${item.end}`}</p>
+                        </div>
+                        <div className="audit-record-status">
+                          <span className={'status ' + statusClass(item.status)}>{item.status}</span>
+                          {item.hasAbnormalities && (
+                            <span className="abnormal-badge">
+                              <AlertTriangle size={12} />
+                              {item.abnormalityCount} 处异常
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="audit-timeline-preview">
+                        {item.analyzedSteps.length === 0 ? (
+                          <span className="no-timeline">历史数据：无完整timeline记录</span>
+                        ) : (
+                          item.analyzedSteps.map((step, idx) => (
+                            <div key={idx} className={'timeline-preview-step ' + (step.abnormalities.length > 0 ? 'abnormal' : '')}>
+                              <span className={'step-status ' + statusClass(step.status)}>{step.status}</span>
+                              {idx < item.analyzedSteps.length - 1 && (
+                                <ArrowRightLeft size={12} className="step-arrow" />
+                              )}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </article>
+                  ))
+                )}
+              </div>
+            </div>
+          ) : viewMode === 'list' ? (
             <div className="records">
               {filteredRecords.map((item) => (
                 <article className={'record ' + (item.conflict || hasOverlap(item, records) ? 'conflict' : '')} key={item.id} onClick={() => setSelected(item)}>
@@ -1145,10 +1413,79 @@ function App() {
 
         <aside className="panel detail-panel">
           <div className="panel-title">
-            <CheckCircle2 size={18} />
-            <h2>详情</h2>
+            {auditViewMode ? (
+              <>
+                <GitBranch size={18} />
+                <h2>流转审计详情</h2>
+              </>
+            ) : (
+              <>
+                <CheckCircle2 size={18} />
+                <h2>详情</h2>
+              </>
+            )}
           </div>
-          {selected ? (
+          {auditViewMode && selectedAuditRecord ? (
+            <div className="detail audit-detail">
+              <h3>{`${selectedAuditRecord.bed} · ${selectedAuditRecord.patient}`}</h3>
+              <p>{`${selectedAuditRecord.date} ${selectedAuditRecord.shift} · ${selectedAuditRecord.start}-${selectedAuditRecord.end}`}</p>
+              <p>当前状态：<span className={'status ' + statusClass(selectedAuditRecord.status)}>{selectedAuditRecord.status}</span></p>
+
+              {selectedAuditRecord.hasAbnormalities && (
+                <div className="audit-abnormalities">
+                  <h4 className="abnormal-title">
+                    <AlertOctagon size={16} />
+                    异常流转 ({selectedAuditRecord.abnormalityCount} 处)
+                  </h4>
+                  <div className="abnormal-list">
+                    {selectedAuditRecord.abnormalities.map((ab, idx) => (
+                      <div key={idx} className={'abnormal-item severity-' + ab.severity}>
+                        <span className="abnormal-type">{ab.label}</span>
+                        <span className="abnormal-desc">{ab.description}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="timeline audit-timeline">
+                <h4 className="timeline-title">
+                  <History size={16} />
+                  状态流转轨迹
+                </h4>
+                {selectedAuditRecord.analyzedSteps.length === 0 ? (
+                  <div className="no-timeline-history">
+                    <AlertCircle size={16} />
+                    <span>历史数据：无完整timeline记录，仅显示当前状态</span>
+                  </div>
+                ) : (
+                  selectedAuditRecord.analyzedSteps.map((step, index) => (
+                    <div key={index} className={'timeline-step ' + (step.abnormalities.length > 0 ? 'has-abnormality' : '')}>
+                      <div className="timeline-step-header">
+                        <span className={'status ' + statusClass(step.status)}>{step.status}</span>
+                        <span className="timeline-step-meta">{step.at} · {step.by}</span>
+                      </div>
+                      {step.abnormalities.length > 0 && (
+                        <div className="step-abnormalities">
+                          {step.abnormalities.map((ab, abIdx) => (
+                            <span key={abIdx} className={'step-abnormal-tag severity-' + ab.severity}>
+                              <AlertTriangle size={10} />
+                              {ab.label}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {index < selectedAuditRecord.analyzedSteps.length - 1 && (
+                        <div className="timeline-step-connector">
+                          <ArrowRightLeft size={12} />
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          ) : selected ? (
             <div className="detail">
               <h3>{`${selected.bed} · ${selected.patient}`}</h3>
               <p>{`${selected.date} ${selected.shift} · ${selected.start}-${selected.end}`}</p>
@@ -1165,7 +1502,7 @@ function App() {
               </div>
             </div>
           ) : (
-            <p className="empty">点击任意记录查看详情和状态流转。</p>
+            <p className="empty">{auditViewMode ? '点击任意记录查看流转审计详情。' : '点击任意记录查看详情和状态流转。'}</p>
           )}
         </aside>
       </section>
