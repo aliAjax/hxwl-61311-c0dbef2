@@ -393,7 +393,11 @@ function validateBackupRecord(record, index) {
     errors.push('结束时间格式错误，应为 HH:MM');
   }
   if (record.start && record.end && isValidTime(record.start) && isValidTime(record.end) && !(normalizeTime(record.start) < normalizeTime(record.end))) {
-    errors.push('开始时间须早于结束时间');
+    if (String(record.shift || '').trim() !== '夜间') {
+      errors.push('开始时间须早于结束时间（非夜间班次不允许跨日）');
+    } else {
+      warnings.push('夜间班跨日安排，系统按当日日期处理');
+    }
   }
   if (record.status && !appConfig.statuses.includes(record.status)) {
     warnings.push(`状态「${record.status}」不在允许列表中，将使用默认状态「${appConfig.primaryStatus}」`);
@@ -599,9 +603,38 @@ function timeToMinutes(timeStr) {
   return h * 60 + m;
 }
 
+function isCrossDay(start, end) {
+  if (!isValidTime(start) || !isValidTime(end)) return false;
+  return timeToMinutes(end) <= timeToMinutes(start);
+}
+
+function timeRangeOverlaps(aStart, aEnd, bStart, bEnd) {
+  const aS = timeToMinutes(aStart);
+  const aE = timeToMinutes(aEnd);
+  const bS = timeToMinutes(bStart);
+  const bE = timeToMinutes(bEnd);
+
+  const aCross = aE <= aS;
+  const bCross = bE <= bS;
+
+  if (!aCross && !bCross) {
+    return aS < bE && aE > bS;
+  }
+
+  if (aCross && bCross) {
+    return true;
+  }
+
+  if (aCross) {
+    return aS < bE || aE > bS;
+  }
+
+  return bS < aE || bE > aS;
+}
+
 function hasOverlap(target, records) {
   if (!target.bed || !target.date || !target.start || !target.end) return false;
-  return records.some((item) => item.id !== target.id && item.bed === target.bed && item.date === target.date && target.start < item.end && target.end > item.start);
+  return records.some((item) => item.id !== target.id && item.bed === target.bed && item.date === target.date && timeRangeOverlaps(target.start, target.end, item.start, item.end));
 }
 
 const RULE_SEVERITY = {
@@ -621,7 +654,7 @@ const SCHEDULING_RULES = [
   {
     id: RULE_IDS.BED_TIME_OVERLAP,
     title: '同床位时间重叠',
-    description: '同一床位同一日期，两个安排的时间段不得重叠',
+    description: '同一床位同一日期，两个安排的时间段不得重叠（含跨日情况）',
     severity: RULE_SEVERITY.ERROR,
     enabled: true,
     check: (target, records) => {
@@ -630,8 +663,7 @@ const SCHEDULING_RULES = [
         item.id !== target.id &&
         item.bed === target.bed &&
         item.date === target.date &&
-        target.start < item.end &&
-        target.end > item.start
+        timeRangeOverlaps(target.start, target.end, item.start, item.end)
       );
       if (overlapped.length === 0) return null;
       const names = overlapped.map((o) => `${o.patient}(${o.start}-${o.end})`).join('、');
@@ -644,7 +676,7 @@ const SCHEDULING_RULES = [
   {
     id: RULE_IDS.END_BEFORE_START,
     title: '结束时间早于开始时间',
-    description: '结束时间必须晚于开始时间',
+    description: '结束时间早于开始时间可能表示跨日透析（警告），或录入错误（错误）',
     severity: RULE_SEVERITY.ERROR,
     enabled: true,
     check: (target) => {
@@ -653,9 +685,16 @@ const SCHEDULING_RULES = [
       const startMin = timeToMinutes(target.start);
       const endMin = timeToMinutes(target.end);
       if (endMin <= startMin) {
+        if (target.shift === '夜间') {
+          return {
+            _severity: RULE_SEVERITY.WARNING,
+            message: `夜间班 ${target.start}-${target.end} 为跨日安排`,
+            detail: '系统按当日日期处理，实际透析跨越至次日，请确认时间录入无误'
+          };
+        }
         return {
           message: `结束时间 ${target.end} 不晚于开始时间 ${target.start}`,
-          detail: '请确保透析结束时间晚于预计开始时间'
+          detail: '非夜间班次的时间段不应跨日，请检查是否录入错误'
         };
       }
       return null;
@@ -702,6 +741,9 @@ const SCHEDULING_RULES = [
       const conflicts = cleaningRecords.filter((cr) => {
         if (!cr.end) return true;
         const crEnd = timeToMinutes(cr.end);
+        if (isCrossDay(cr.start, cr.end)) {
+          return targetStart < 24 * 60 || targetStart < crEnd + 30;
+        }
         return targetStart < crEnd + 30;
       });
       if (conflicts.length === 0) return null;
@@ -751,7 +793,7 @@ function evaluateRules(target, records, options = {}) {
     if (result) {
       violations.push({
         ruleId: rule.id,
-        severity: rule.severity,
+        severity: result._severity || rule.severity,
         title: rule.title,
         message: result.message,
         detail: result.detail || ''
@@ -1190,7 +1232,9 @@ function validateParsed(parsed, existingRecords) {
       errors.push('结束时间格式错误');
     }
     if (row.start && row.end && isValidTime(row.start) && isValidTime(row.end) && !(normalizeTime(row.start) < normalizeTime(row.end))) {
-      errors.push('开始时间须早于结束时间');
+      if (String(row.shift || '').trim() !== '夜间') {
+        errors.push('开始时间须早于结束时间（非夜间班次不允许跨日）');
+      }
     }
 
     const normalized = {
@@ -1202,13 +1246,10 @@ function validateParsed(parsed, existingRecords) {
     };
 
     if (errors.length === 0) {
-      const allForCheck = [...existingRecords, ...parsed.filter((r, i) => parsed.indexOf(row) > i).map((r) => ({ id: `_pre_${parsed.indexOf(r)}`, bed: normalizeDate(r.bed), date: normalizeDate(r.date), start: normalizeTime(r.start), end: normalizeTime(r.end) }))];
-      const tempTarget = { id: `_cur_${parsed.indexOf(row)}`, ...normalized };
       const overlapExisting = existingRecords.some((item) =>
         item.bed === normalized.bed &&
         item.date === normalized.date &&
-        normalized.start < item.end &&
-        normalized.end > item.start
+        timeRangeOverlaps(normalized.start, normalized.end, item.start, item.end)
       );
       const overlapInBatch = parsed.some((other, idx) => {
         if (other === row) return false;
@@ -1217,7 +1258,7 @@ function validateParsed(parsed, existingRecords) {
         const oe = normalizeTime(other.end);
         const ob = String(other.bed || '').trim();
         if (!ob || !od || !os || !oe) return false;
-        return ob === normalized.bed && od === normalized.date && normalized.start < oe && normalized.end > os;
+        return ob === normalized.bed && od === normalized.date && timeRangeOverlaps(normalized.start, normalized.end, os, oe);
       });
       if (overlapExisting || overlapInBatch) {
         warnings.push('床位时间重叠');
@@ -1307,7 +1348,42 @@ function App() {
       createdAt: new Date().toISOString(),
       timeline: [{ status: appConfig.statuses.includes(p.row.status) ? p.row.status : appConfig.primaryStatus, at: today, by: '批量导入' }]
     }));
-    persist([...newRecords, ...records]);
+
+    const combinedRecords = [...newRecords, ...records];
+    const allViolations = [];
+    for (const nr of newRecords) {
+      const vs = evaluateRules(nr, combinedRecords);
+      if (vs.length > 0) {
+        allViolations.push({ record: nr, violations: vs });
+      }
+    }
+
+    if (allViolations.length > 0) {
+      const errors = allViolations.filter((av) => av.violations.some((v) => v.severity === RULE_SEVERITY.ERROR));
+      const warnings = allViolations.filter((av) => av.violations.every((v) => v.severity === RULE_SEVERITY.WARNING));
+
+      if (errors.length > 0) {
+        const msg = errors.slice(0, 5).map((av, i) => {
+          const errList = av.violations.filter(v => v.severity === RULE_SEVERITY.ERROR).map(v => v.message).join('；');
+          return `${i + 1}. ${av.record.bed} · ${av.record.patient}（${av.record.date} ${av.record.shift}）：${errList}`;
+        }).join('\n');
+        const more = errors.length > 5 ? `\n...还有 ${errors.length - 5} 条错误` : '';
+        alert(`批量导入中 ${errors.length} 条记录存在规则错误，无法导入：\n\n${msg}${more}\n\n请修正后重新导入。`);
+        return;
+      }
+
+      if (warnings.length > 0) {
+        const msg = warnings.slice(0, 5).map((av, i) => {
+          const warnList = av.violations.filter(v => v.severity === RULE_SEVERITY.WARNING).map(v => v.message).join('；');
+          return `${i + 1}. ${av.record.bed} · ${av.record.patient}（${av.record.date} ${av.record.shift}）：${warnList}`;
+        }).join('\n');
+        const more = warnings.length > 5 ? `\n...还有 ${warnings.length - 5} 条警告` : '';
+        const ok = confirm(`批量导入中 ${warnings.length} 条记录存在合规警告：\n\n${msg}${more}\n\n是否仍然继续导入？`);
+        if (!ok) return;
+      }
+    }
+
+    persist(combinedRecords);
     setImportOpen(false);
     setImportText('');
     setParsedPreview([]);
@@ -1411,6 +1487,40 @@ function App() {
       alert(`存在 ${backupValidationResults.filter((r) => !r.valid).length} 条无效记录，请先修正或移除后再恢复。`);
       return;
     }
+
+    const allViolations = [];
+    for (const rec of backupValidRecords) {
+      const vs = evaluateRules(rec, backupValidRecords);
+      if (vs.length > 0) {
+        allViolations.push({ record: rec, violations: vs });
+      }
+    }
+
+    if (allViolations.length > 0) {
+      const errors = allViolations.filter((av) => av.violations.some((v) => v.severity === RULE_SEVERITY.ERROR));
+      const warnings = allViolations.filter((av) => av.violations.every((v) => v.severity === RULE_SEVERITY.WARNING));
+
+      if (errors.length > 0) {
+        const msg = errors.slice(0, 5).map((av, i) => {
+          const errList = av.violations.filter(v => v.severity === RULE_SEVERITY.ERROR).map(v => v.message).join('；');
+          return `${i + 1}. ${av.record.bed} · ${av.record.patient}（${av.record.date} ${av.record.shift}）：${errList}`;
+        }).join('\n');
+        const more = errors.length > 5 ? `\n...还有 ${errors.length - 5} 条错误` : '';
+        alert(`备份数据中 ${errors.length} 条记录存在规则错误，无法恢复：\n\n${msg}${more}\n\n请修正备份文件后再恢复。`);
+        return;
+      }
+
+      if (warnings.length > 0) {
+        const msg = warnings.slice(0, 5).map((av, i) => {
+          const warnList = av.violations.filter(v => v.severity === RULE_SEVERITY.WARNING).map(v => v.message).join('；');
+          return `${i + 1}. ${av.record.bed} · ${av.record.patient}（${av.record.date} ${av.record.shift}）：${warnList}`;
+        }).join('\n');
+        const more = warnings.length > 5 ? `\n...还有 ${warnings.length - 5} 条警告` : '';
+        const ok = confirm(`备份数据中 ${warnings.length} 条记录存在合规警告：\n\n${msg}${more}\n\n是否仍然继续恢复？`);
+        if (!ok) return;
+      }
+    }
+
     persist(backupValidRecords);
     handleBackupClose();
   }
@@ -1438,8 +1548,10 @@ function App() {
       return;
     }
     if (!(normalizeTime(form.start) < normalizeTime(form.end))) {
-      alert('开始时间须早于结束时间');
-      return;
+      if (form.shift !== '夜间') {
+        alert('开始时间须早于结束时间（非夜间班次不允许跨日）');
+        return;
+      }
     }
 
     const target = editing ? { ...form, id: editing.id } : { ...form, id: uid() };
@@ -1479,10 +1591,11 @@ function App() {
         timeline: [{ status: form.status || appConfig.primaryStatus, at: today, by: '录入' }]
       };
 
-      if (appConfig.conflict === 'date-slot' && records.some((item) => item.date === nextRecord.date && item.slot === nextRecord.slot)) {
+      const recViolations = evaluateRules(nextRecord, records);
+      if (recViolations.some((v) => v.severity === RULE_SEVERITY.ERROR)) {
         nextRecord.conflict = true;
       }
-      if (appConfig.conflict === 'bed-time' && hasOverlap(nextRecord, records)) {
+      if (appConfig.conflict === 'date-slot' && records.some((item) => item.date === nextRecord.date && item.slot === nextRecord.slot)) {
         nextRecord.conflict = true;
       }
       if (appConfig.chart) {
@@ -1587,6 +1700,19 @@ function App() {
 
   function duplicateRecord(item) {
     const copied = { ...item, id: uid(), status: appConfig.primaryStatus, timeline: [{ status: appConfig.primaryStatus, at: today, by: '复制' }] };
+    const violations = evaluateRules(copied, [copied, ...records]);
+    const errors = violations.filter((v) => v.severity === RULE_SEVERITY.ERROR);
+    const warnings = violations.filter((v) => v.severity === RULE_SEVERITY.WARNING);
+    if (errors.length > 0) {
+      const msg = errors.map((e, i) => `${i + 1}. ${e.title}：${e.message}`).join('\n');
+      alert(`复制记录将产生 ${errors.length} 项规则错误：\n\n${msg}\n\n请调整后再操作。`);
+      return;
+    }
+    if (warnings.length > 0) {
+      const msg = warnings.map((w, i) => `${i + 1}. ${w.title}：${w.message}`).join('\n');
+      const ok = confirm(`复制记录将产生 ${warnings.length} 项合规警告：\n\n${msg}\n\n是否仍然继续？`);
+      if (!ok) return;
+    }
     persist([copied, ...records]);
     setSelected(copied);
   }
