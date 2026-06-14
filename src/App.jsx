@@ -691,6 +691,15 @@ function App() {
     return h * 60 + m;
   }
 
+  function overlapsTimelineRange(item, range) {
+    if (!item.start || !item.end) return false;
+    const startMin = timeToMinutes(item.start);
+    const endMin = timeToMinutes(item.end);
+    const rangeStart = timeToMinutes(range.start);
+    const rangeEnd = timeToMinutes(range.end);
+    return startMin < rangeEnd && endMin > rangeStart;
+  }
+
   const timelineDate = today;
 
   const timelineRange = useMemo(() => {
@@ -714,8 +723,12 @@ function App() {
   }, [filteredRecords, timelineDate]);
 
   const timelineRecords = useMemo(() => {
-    return filteredRecords.filter((item) => item.date === timelineDate);
-  }, [filteredRecords, timelineDate]);
+    return filteredRecords.filter((item) => item.date === timelineDate && overlapsTimelineRange(item, timelineRange));
+  }, [filteredRecords, timelineDate, timelineRange]);
+
+  const timelineConflictRecords = useMemo(() => {
+    return timelineRecords.filter((item) => hasOverlap(item, records));
+  }, [timelineRecords, records]);
 
   const timelineHours = useMemo(() => {
     const hours = [];
@@ -1092,10 +1105,10 @@ function App() {
                   </div>
                 </div>
               )}
-              {timelineRecords.filter(r => hasOverlap(r, records)).length > 0 && (
+              {timelineConflictRecords.length > 0 && (
                 <div className="timeline-conflict-summary">
                   <AlertTriangle size={16} />
-                  <span>共发现 {timelineRecords.filter(r => hasOverlap(r, records)).length} 条时间重叠记录，请点击冲突块查看详情并调整安排。</span>
+                  <span>共发现 {timelineConflictRecords.length} 条时间重叠记录，请点击冲突块查看详情并调整安排。</span>
                 </div>
               )}
             </div>
