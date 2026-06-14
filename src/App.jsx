@@ -1,5 +1,5 @@
 import { useMemo, useState, useCallback } from 'react';
-import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, Upload, FileText, X, AlertCircle, CheckCheck, LayoutGrid, List, ClipboardCopy } from 'lucide-react';
+import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, Upload, FileText, X, AlertCircle, CheckCheck, LayoutGrid, List, ClipboardCopy, Clock } from 'lucide-react';
 import './App.css';
 
 const appConfig = {
@@ -99,6 +99,24 @@ const appConfig = {
       "start": "08:30",
       "end": "12:30",
       "status": "清洁中"
+    },
+    {
+      "patient": "刘奶奶",
+      "date": "2026-06-14",
+      "shift": "上午",
+      "bed": "B03",
+      "start": "10:00",
+      "end": "14:00",
+      "status": "待到达"
+    },
+    {
+      "patient": "周大爷",
+      "date": "2026-06-14",
+      "shift": "夜间",
+      "bed": "B02",
+      "start": "19:00",
+      "end": "23:00",
+      "status": "待到达"
     }
   ],
   "metrics": [
@@ -405,6 +423,7 @@ function App() {
   const [filters, setFilters] = useState({ query: '', status: '全部' });
   const [selected, setSelected] = useState(null);
   const [viewMode, setViewMode] = useState('list');
+  const [timelineShift, setTimelineShift] = useState('全部');
 
   const [importOpen, setImportOpen] = useState(false);
   const [importText, setImportText] = useState('');
@@ -659,6 +678,110 @@ function App() {
     return grid;
   }, [filteredRecords, calendarDates, calendarBeds]);
 
+  const SHIFT_TIME_RANGES = {
+    '上午': { start: '06:00', end: '12:00' },
+    '下午': { start: '12:00', end: '18:00' },
+    '夜间': { start: '18:00', end: '24:00' },
+    '全部': { start: '06:00', end: '24:00' }
+  };
+
+  function timeToMinutes(timeStr) {
+    if (!timeStr) return 0;
+    const [h, m] = timeStr.split(':').map(Number);
+    return h * 60 + m;
+  }
+
+  const timelineDate = today;
+
+  const timelineRange = useMemo(() => {
+    return SHIFT_TIME_RANGES[timelineShift] || SHIFT_TIME_RANGES['全部'];
+  }, [timelineShift]);
+
+  const timelineTotalMinutes = useMemo(() => {
+    const startMin = timeToMinutes(timelineRange.start);
+    const endMin = timeToMinutes(timelineRange.end);
+    return endMin - startMin;
+  }, [timelineRange]);
+
+  const timelineBeds = useMemo(() => {
+    const bedField = appConfig.fields.find((f) => f.key === 'bed');
+    const configBeds = bedField?.options || [];
+    const recordBeds = filteredRecords
+      .filter((item) => item.date === timelineDate)
+      .map((item) => item.bed)
+      .filter(Boolean);
+    return Array.from(new Set([...configBeds, ...recordBeds])).sort();
+  }, [filteredRecords, timelineDate]);
+
+  const timelineRecords = useMemo(() => {
+    return filteredRecords.filter((item) => item.date === timelineDate);
+  }, [filteredRecords, timelineDate]);
+
+  const timelineHours = useMemo(() => {
+    const hours = [];
+    const startHour = parseInt(timelineRange.start.split(':')[0], 10);
+    const endHour = parseInt(timelineRange.end.split(':')[0], 10);
+    for (let h = startHour; h <= endHour; h++) {
+      hours.push(`${String(h).padStart(2, '0')}:00`);
+    }
+    return hours;
+  }, [timelineRange]);
+
+  const timelineData = useMemo(() => {
+    const data = {};
+    for (const bed of timelineBeds) {
+      const bedRecords = timelineRecords
+        .filter((item) => item.bed === bed)
+        .sort((a, b) => (a.start || '').localeCompare(b.start || ''));
+
+      const itemsWithPosition = bedRecords.map((item) => {
+        const startMin = Math.max(timeToMinutes(item.start), timeToMinutes(timelineRange.start));
+        const endMin = Math.min(timeToMinutes(item.end), timeToMinutes(timelineRange.end));
+        const rangeStart = timeToMinutes(timelineRange.start);
+        const left = ((startMin - rangeStart) / timelineTotalMinutes) * 100;
+        const width = Math.max(0, ((endMin - startMin) / timelineTotalMinutes) * 100);
+        const hasOverlapFlag = hasOverlap(item, records);
+        return {
+          ...item,
+          left,
+          width,
+          hasOverlap: hasOverlapFlag,
+          row: 0
+        };
+      });
+
+      const rows = [];
+      itemsWithPosition.forEach((item) => {
+        const itemStart = item.left;
+        const itemEnd = item.left + item.width;
+        let placed = false;
+        for (let i = 0; i < rows.length; i++) {
+          const rowItems = rows[i];
+          const canFit = rowItems.every((ri) => {
+            const riEnd = ri.left + ri.width;
+            return itemEnd <= ri.left || itemStart >= riEnd;
+          });
+          if (canFit) {
+            item.row = i;
+            rowItems.push(item);
+            placed = true;
+            break;
+          }
+        }
+        if (!placed) {
+          item.row = rows.length;
+          rows.push([item]);
+        }
+      });
+
+      data[bed] = {
+        items: itemsWithPosition,
+        maxRows: rows.length
+      };
+    }
+    return data;
+  }, [timelineBeds, timelineRecords, timelineRange, timelineTotalMinutes, records]);
+
   const directory = useMemo(() => {
     return records.reduce((acc, item) => {
       const key = item.issue || '未分类';
@@ -802,6 +925,9 @@ function App() {
               <button type="button" className={'toggle-btn ' + (viewMode === 'calendar' ? 'active' : '')} onClick={() => setViewMode('calendar')} title="日历视图">
                 <LayoutGrid size={16} />
               </button>
+              <button type="button" className={'toggle-btn ' + (viewMode === 'timeline' ? 'active' : '')} onClick={() => setViewMode('timeline')} title="时间轴视图">
+                <Clock size={16} />
+              </button>
             </div>
           </div>
 
@@ -829,7 +955,7 @@ function App() {
                 </article>
               ))}
             </div>
-          ) : (
+          ) : viewMode === 'calendar' ? (
             <div className="calendar-wrap">
               {calendarDates.length === 0 || calendarBeds.length === 0 ? (
                 <p className="empty">暂无排班数据</p>
@@ -882,6 +1008,94 @@ function App() {
                     });
                     return [rowHeader, ...cells];
                   })}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="timeline-wrap">
+              <div className="timeline-toolbar">
+                <div className="timeline-shift-tabs">
+                  {['全部', '上午', '下午', '夜间'].map((shift) => (
+                    <button
+                      key={shift}
+                      type="button"
+                      className={'shift-tab ' + (timelineShift === shift ? 'active' : '')}
+                      onClick={() => setTimelineShift(shift)}
+                    >
+                      {shift}
+                    </button>
+                  ))}
+                </div>
+                <div className="timeline-date-info">
+                  <span>今日：{timelineDate}</span>
+                </div>
+              </div>
+              {timelineBeds.length === 0 ? (
+                <p className="empty">暂无床位数据</p>
+              ) : (
+                <div className="timeline-container">
+                  <div className="timeline-header">
+                    <div className="timeline-bed-col">床位</div>
+                    <div className="timeline-time-col">
+                      <div className="timeline-time-scale">
+                        {timelineHours.map((hour) => (
+                          <div key={hour} className="timeline-hour-mark">
+                            <span>{hour}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="timeline-body">
+                    {timelineBeds.map((bed) => {
+                      const bedData = timelineData[bed] || { items: [], maxRows: 0 };
+                      const rowHeight = Math.max(44, 36 + bedData.maxRows * 28);
+                      return (
+                        <div className="timeline-row" key={bed} style={{ minHeight: rowHeight }}>
+                          <div className="timeline-bed-col">
+                            <Bed size={14} />
+                            <span>{bed}</span>
+                          </div>
+                          <div className="timeline-time-col">
+                            <div className="timeline-grid-lines">
+                              {timelineHours.map((hour, idx) => (
+                                <div key={hour} className={'timeline-grid-line ' + (idx === 0 ? 'first' : '')}></div>
+                              ))}
+                            </div>
+                            <div className="timeline-items">
+                              {bedData.items.map((item) => (
+                                <div
+                                  key={item.id}
+                                  className={'timeline-block ' + statusClass(item.status) + (item.hasOverlap ? ' conflict' : '')}
+                                  style={{
+                                    left: `${item.left}%`,
+                                    width: `${item.width}%`,
+                                    top: `${item.row * 28 + 4}px`
+                                  }}
+                                  onClick={() => setSelected(item)}
+                                  title={`${item.patient} · ${item.start}-${item.end}${item.hasOverlap ? ' · 时间冲突' : ''}`}
+                                >
+                                  <span className="timeline-block-patient">{item.patient}</span>
+                                  <span className="timeline-block-time">{item.start}-{item.end}</span>
+                                  {item.hasOverlap && (
+                                    <span className="timeline-conflict-badge">
+                                      <AlertTriangle size={10} />
+                                    </span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {timelineRecords.filter(r => hasOverlap(r, records)).length > 0 && (
+                <div className="timeline-conflict-summary">
+                  <AlertTriangle size={16} />
+                  <span>共发现 {timelineRecords.filter(r => hasOverlap(r, records)).length} 条时间重叠记录，请点击冲突块查看详情并调整安排。</span>
                 </div>
               )}
             </div>
