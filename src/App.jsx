@@ -530,7 +530,7 @@ function computeDiffSummary(currentRecords, importedRecords) {
 }
 
 function recordsEqualIgnoringId(a, b) {
-  return REQUIRED_FIELDS.every(k => String(a[k] || '') === String(b[k] || '')) && a.status === b.status;
+  return REQUIRED_FIELDS.every(k => String(a[k] || '') === String(b[k] || ''));
 }
 
 function avg(numbers) {
