@@ -1298,7 +1298,7 @@ function validateParsed(parsed, existingRecords) {
 function App() {
   const [records, setRecords] = useState(loadRecords);
   const [form, setForm] = useState(appConfig.defaultValues);
-  const [filters, setFilters] = useState({ query: '', status: '全部' });
+  const [filters, setFilters] = useState({ query: '', status: '全部', date: '', shift: '全部', bed: '全部' });
   const [selected, setSelected] = useState(null);
   const [viewMode, setViewMode] = useState('list');
   const [timelineShift, setTimelineShift] = useState('全部');
@@ -1755,6 +1755,9 @@ function App() {
     return records
       .filter((item) => !filters.query || `${item.patient}${item.bed}${item.shift}`.includes(filters.query))
       .filter((item) => filters.status === '全部' || item.status === filters.status)
+      .filter((item) => !filters.date || item.date === filters.date)
+      .filter((item) => filters.shift === '全部' || item.shift === filters.shift)
+      .filter((item) => filters.bed === '全部' || item.bed === filters.bed)
       .sort((a, b) => {
         if (appConfig.sort === 'priority') {
           const rank = priorityRank(a.priority) - priorityRank(b.priority);
@@ -2015,7 +2018,23 @@ function App() {
     }, {});
   }, [records]);
 
-  const operators = useMemo(() => getOperators(records), [records]);
+  function clearFilters() {
+    setFilters({ query: '', status: '全部', date: '', shift: '全部', bed: '全部' });
+  }
+
+  const hasActiveFilters = filters.query !== '' || filters.status !== '全部' || filters.date !== '' || filters.shift !== '全部' || filters.bed !== '全部';
+
+  const bedOptions = useMemo(() => {
+    const bedField = appConfig.fields.find((f) => f.key === 'bed');
+    const configBeds = bedField?.options || [];
+    const recordBeds = records.map((item) => item.bed).filter(Boolean);
+    return Array.from(new Set([...configBeds, ...recordBeds])).sort();
+  }, [records]);
+
+  const shiftOptions = useMemo(() => {
+    const shiftField = appConfig.fields.find((f) => f.key === 'shift');
+    return shiftField?.options || [];
+  }, []);
 
   const auditRecords = useMemo(() => {
     return filterAuditRecords(records, auditFilters).map((item) => {
@@ -2327,6 +2346,30 @@ function App() {
               <option>全部</option>
               {appConfig.statuses.map((status) => <option key={status}>{status}</option>)}
             </select>
+            <div className="filter-input-wrapper">
+              <Calendar size={14} className="filter-input-icon" />
+              <input
+                type="date"
+                value={filters.date}
+                onChange={(event) => setFilters({ ...filters, date: event.target.value })}
+                className="filter-date-input"
+                placeholder="选择透析日期"
+              />
+            </div>
+            <select value={filters.shift} onChange={(event) => setFilters({ ...filters, shift: event.target.value })}>
+              <option value="全部">全部班次</option>
+              {shiftOptions.map((shift) => <option key={shift}>{shift}</option>)}
+            </select>
+            <select value={filters.bed} onChange={(event) => setFilters({ ...filters, bed: event.target.value })}>
+              <option value="全部">全部床位</option>
+              {bedOptions.map((bed) => <option key={bed}>{bed}</option>)}
+            </select>
+            {hasActiveFilters && (
+              <button type="button" className="clear-filters-btn" onClick={clearFilters} title="清空所有筛选条件">
+                <X size={14} />
+                清空筛选
+              </button>
+            )}
             <div className="view-toggle">
               <button type="button" className={'toggle-btn ' + (!auditViewMode && !patientTrackView && viewMode === 'list' ? 'active' : '')} onClick={() => { setAuditViewMode(false); setPatientTrackView(false); setSelectedPatient(null); setViewMode('list'); }} title="列表视图">
                 <List size={16} />
@@ -2345,6 +2388,45 @@ function App() {
               </button>
             </div>
           </div>
+
+          {hasActiveFilters && (
+            <div className="active-filters-bar">
+              <span className="active-filters-label">当前筛选：</span>
+              <div className="active-filters-tags">
+                {filters.query && (
+                  <span className="filter-tag">
+                    <Search size={10} />关键词: {filters.query}
+                    <button onClick={() => setFilters({ ...filters, query: '' })}><X size={10} /></button>
+                  </span>
+                )}
+                {filters.status !== '全部' && (
+                  <span className="filter-tag">
+                    状态: {filters.status}
+                    <button onClick={() => setFilters({ ...filters, status: '全部' })}><X size={10} /></button>
+                  </span>
+                )}
+                {filters.date && (
+                  <span className="filter-tag">
+                    <Calendar size={10} />日期: {filters.date}
+                    <button onClick={() => setFilters({ ...filters, date: '' })}><X size={10} /></button>
+                  </span>
+                )}
+                {filters.shift !== '全部' && (
+                  <span className="filter-tag">
+                    班次: {filters.shift}
+                    <button onClick={() => setFilters({ ...filters, shift: '全部' })}><X size={10} /></button>
+                  </span>
+                )}
+                {filters.bed !== '全部' && (
+                  <span className="filter-tag">
+                    <Bed size={10} />床位: {filters.bed}
+                    <button onClick={() => setFilters({ ...filters, bed: '全部' })}><X size={10} /></button>
+                  </span>
+                )}
+              </div>
+              <span className="filter-result-count">共 {filteredRecords.length} 条记录</span>
+            </div>
+          )}
 
           {patientTrackView ? (
             <div className="patient-track-panel">
@@ -2636,45 +2718,85 @@ function App() {
               </div>
             </div>
           ) : viewMode === 'list' ? (
-            <div className="records">
-              {filteredRecords.map((item) => {
-                const violations = getRecordViolations(item);
-                const hasErrors = violations.some((v) => v.severity === RULE_SEVERITY.ERROR);
-                const hasWarnings = violations.some((v) => v.severity === RULE_SEVERITY.WARNING);
-                const isBad = hasErrors || item.conflict;
-                return (
-                  <article className={'record ' + (isBad ? 'conflict' : '') + (hasWarnings && !isBad ? 'warning' : '')} key={item.id} onClick={() => setSelected(item)}>
-                    <div className="record-head">
-                      <div>
-                        <h3>{`${item.bed} · ${item.patient}`}</h3>
-                        <p>{`${item.date} ${item.shift} · ${item.start}-${item.end}`}</p>
+            filteredRecords.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-state-icon">
+                  <ClipboardList size={48} />
+                </div>
+                <h3 className="empty-state-title">
+                  {hasActiveFilters ? '没有找到匹配的记录' : '暂无排班记录'}
+                </h3>
+                <p className="empty-state-desc">
+                  {hasActiveFilters
+                    ? '请尝试调整筛选条件或点击「清空筛选」查看所有记录'
+                    : '使用左侧表单添加第一条透析排班记录'}
+                </p>
+                {hasActiveFilters && (
+                  <button type="button" className="empty-state-action" onClick={clearFilters}>
+                    <RotateCcw size={16} />
+                    清空所有筛选条件
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="records">
+                {filteredRecords.map((item) => {
+                  const violations = getRecordViolations(item);
+                  const hasErrors = violations.some((v) => v.severity === RULE_SEVERITY.ERROR);
+                  const hasWarnings = violations.some((v) => v.severity === RULE_SEVERITY.WARNING);
+                  const isBad = hasErrors || item.conflict;
+                  return (
+                    <article className={'record ' + (isBad ? 'conflict' : '') + (hasWarnings && !isBad ? 'warning' : '')} key={item.id} onClick={() => setSelected(item)}>
+                      <div className="record-head">
+                        <div>
+                          <h3>{`${item.bed} · ${item.patient}`}</h3>
+                          <p>{`${item.date} ${item.shift} · ${item.start}-${item.end}`}</p>
+                        </div>
+                        <span className={'status ' + statusClass(item.status)}>{item.status}</span>
                       </div>
-                      <span className={'status ' + statusClass(item.status)}>{item.status}</span>
-                    </div>
-                    <p className="record-detail">{violationSummaryText(item)}</p>
-                    {(isBad || hasWarnings) && (
-                      <div className="warning">
-                        {hasErrors ? <AlertCircle size={15} /> : <AlertTriangle size={15} />}
-                        {hasErrors ? `发现 ${violations.filter(v => v.severity === RULE_SEVERITY.ERROR).length} 项规则错误` : `发现 ${violations.filter(v => v.severity === RULE_SEVERITY.WARNING).length} 项合规警告`}
+                      <p className="record-detail">{violationSummaryText(item)}</p>
+                      {(isBad || hasWarnings) && (
+                        <div className="warning">
+                          {hasErrors ? <AlertCircle size={15} /> : <AlertTriangle size={15} />}
+                          {hasErrors ? `发现 ${violations.filter(v => v.severity === RULE_SEVERITY.ERROR).length} 项规则错误` : `发现 ${violations.filter(v => v.severity === RULE_SEVERITY.WARNING).length} 项合规警告`}
+                        </div>
+                      )}
+                      <div className="actions" onClick={(event) => event.stopPropagation()}>
+                        <button type="button" onClick={() => startEdit(item)}><Edit2 size={14} />编辑</button>
+                        {appConfig.statuses.map((status) => (
+                          <button key={status} type="button" onClick={() => updateStatus(item.id, status)}>{status}</button>
+                        ))}
+                        {appConfig.action === 'copyRecipe' && <button type="button" onClick={() => duplicateRecord(item)}><RotateCcw size={14} />复制</button>}
+                        {appConfig.chart && <button type="button" onClick={() => addTemperature(item)}>加温度</button>}
+                        <button className="ghost-danger" type="button" onClick={() => removeRecord(item.id)}><Trash2 size={14} /></button>
                       </div>
-                    )}
-                    <div className="actions" onClick={(event) => event.stopPropagation()}>
-                      <button type="button" onClick={() => startEdit(item)}><Edit2 size={14} />编辑</button>
-                      {appConfig.statuses.map((status) => (
-                        <button key={status} type="button" onClick={() => updateStatus(item.id, status)}>{status}</button>
-                      ))}
-                      {appConfig.action === 'copyRecipe' && <button type="button" onClick={() => duplicateRecord(item)}><RotateCcw size={14} />复制</button>}
-                      {appConfig.chart && <button type="button" onClick={() => addTemperature(item)}>加温度</button>}
-                      <button className="ghost-danger" type="button" onClick={() => removeRecord(item.id)}><Trash2 size={14} /></button>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )
           ) : viewMode === 'calendar' ? (
             <div className="calendar-wrap">
-              {calendarDates.length === 0 || calendarBeds.length === 0 ? (
-                <p className="empty">暂无排班数据</p>
+              {filteredRecords.length === 0 ? (
+                <div className="empty-state">
+                  <div className="empty-state-icon">
+                    <LayoutGrid size={48} />
+                  </div>
+                  <h3 className="empty-state-title">
+                    {hasActiveFilters ? '没有找到匹配的排班记录' : '暂无排班数据'}
+                  </h3>
+                  <p className="empty-state-desc">
+                    {hasActiveFilters
+                      ? '请尝试调整筛选条件或点击「清空筛选」查看所有排班日历'
+                      : '使用左侧表单添加排班记录后，日历视图将自动展示床位安排'}
+                  </p>
+                  {hasActiveFilters && (
+                    <button type="button" className="empty-state-action" onClick={clearFilters}>
+                      <RotateCcw size={16} />
+                      清空所有筛选条件
+                    </button>
+                  )}
+                </div>
               ) : (
                 <div className="calendar-grid" style={{ gridTemplateColumns: `110px repeat(${calendarDates.length}, minmax(180px, 1fr))` }}>
                   <div className="calendar-corner"></div>
@@ -2750,7 +2872,27 @@ function App() {
                   <span>今日：{timelineDate}</span>
                 </div>
               </div>
-              {timelineBeds.length === 0 ? (
+              {filteredRecords.length === 0 ? (
+                <div className="empty-state">
+                  <div className="empty-state-icon">
+                    <Clock size={48} />
+                  </div>
+                  <h3 className="empty-state-title">
+                    {hasActiveFilters ? '没有找到匹配的时间轴记录' : '暂无时间轴数据'}
+                  </h3>
+                  <p className="empty-state-desc">
+                    {hasActiveFilters
+                      ? '请尝试调整筛选条件或点击「清空筛选」查看完整的时间轴安排'
+                      : '使用左侧表单添加排班记录后，时间轴视图将展示今日床位的时间分布'}
+                  </p>
+                  {hasActiveFilters && (
+                    <button type="button" className="empty-state-action" onClick={clearFilters}>
+                      <RotateCcw size={16} />
+                      清空所有筛选条件
+                    </button>
+                  )}
+                </div>
+              ) : timelineBeds.length === 0 ? (
                 <p className="empty">暂无床位数据</p>
               ) : (
                 <div className="timeline-container">
