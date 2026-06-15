@@ -2365,7 +2365,7 @@ function App() {
                 {filterOptions.beds.map((bed) => <option key={bed}>{bed}</option>)}
               </select>
               <select value={filters.status} onChange={(event) => setFilters({ ...filters, status: event.target.value })} className="filter-select">
-                <option>全部状态</option>
+                <option value="全部">全部状态</option>
                 {appConfig.statuses.map((status) => <option key={status}>{status}</option>)}
               </select>
               {hasActiveFilters && (
@@ -2837,7 +2837,7 @@ function App() {
                   <span>{filters.date ? '筛选日期：' + timelineDate : '今日：' + timelineDate}</span>
                 </div>
               </div>
-              {timelineBeds.length === 0 ? (
+              {(hasActiveFilters ? timelineRecords.length === 0 : timelineBeds.length === 0) ? (
                 <div className="empty-state">
                   <div className="empty-state-icon">
                     <Clock size={48} strokeWidth={1} />
