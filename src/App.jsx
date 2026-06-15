@@ -1302,6 +1302,7 @@ function App() {
   const [selected, setSelected] = useState(null);
   const [viewMode, setViewMode] = useState('list');
   const [timelineShift, setTimelineShift] = useState('全部');
+  const [handoverShift, setHandoverShift] = useState('全部');
   const [editing, setEditing] = useState(null);
 
   const [importOpen, setImportOpen] = useState(false);
@@ -1782,24 +1783,28 @@ function App() {
 
   const todayRecords = useMemo(() => records.filter((item) => item.date === today), [records]);
 
+  const handoverScopeRecords = useMemo(() => {
+    return todayRecords.filter((item) => handoverShift === '全部' || item.shift === handoverShift);
+  }, [todayRecords, handoverShift]);
+
   const handoverSummary = useMemo(() => {
     const counts = {};
     for (const status of appConfig.statuses) {
-      counts[status] = todayRecords.filter((item) => item.status === status).length;
+      counts[status] = handoverScopeRecords.filter((item) => item.status === status).length;
     }
-    const conflictRecords = todayRecords.filter((item) => recordHasAnyViolation(item) || item.conflict);
+    const conflictRecords = handoverScopeRecords.filter((item) => recordHasAnyViolation(item) || item.conflict);
     const conflictBeds = new Set(conflictRecords.map((item) => item.bed));
     counts['存在冲突'] = conflictBeds.size;
 
-    const ruleErrorCount = todayRecords.filter((item) => recordHasErrors(item)).length;
-    const ruleWarningCount = todayRecords.filter((item) => {
+    const ruleErrorCount = handoverScopeRecords.filter((item) => recordHasErrors(item)).length;
+    const ruleWarningCount = handoverScopeRecords.filter((item) => {
       const vs = getRecordViolations(item);
       return vs.some((v) => v.severity === RULE_SEVERITY.WARNING) && !vs.some((v) => v.severity === RULE_SEVERITY.ERROR);
     }).length;
     counts['规则错误'] = ruleErrorCount;
     counts['规则警告'] = ruleWarningCount;
 
-    const focusRecords = todayRecords.filter((item) => {
+    const focusRecords = handoverScopeRecords.filter((item) => {
       if (recordHasAnyViolation(item) || item.conflict) return true;
       if (item.status === '透析中') return true;
       if (item.status === '清洁中') return true;
@@ -1807,7 +1812,7 @@ function App() {
     });
 
     return { counts, conflictRecords, focusRecords, conflictBeds: Array.from(conflictBeds) };
-  }, [todayRecords, records, recordViolationsMap]);
+  }, [handoverScopeRecords, records, recordViolationsMap]);
 
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState(false);
@@ -1815,7 +1820,8 @@ function App() {
   const handleCopySummary = useCallback(() => {
     const { counts, focusRecords } = handoverSummary;
     const lines = [];
-    lines.push(`【今日交接摘要】 ${today}`);
+    const shiftLabel = handoverShift === '全部' ? '全天' : handoverShift;
+    lines.push(`【${shiftLabel}交接摘要】 ${today}`);
     lines.push('');
     lines.push('— 床位状态汇总 —');
     for (const status of appConfig.statuses) {
@@ -1871,7 +1877,7 @@ function App() {
         document.body.removeChild(textarea);
       }
     }
-  }, [handoverSummary, records]);
+  }, [handoverSummary, records, handoverShift]);
 
   const metrics = [
     { label: "今日安排", value: records.filter((item) => item.date === today).length },
@@ -2142,7 +2148,19 @@ function App() {
           <div className="handover-header">
             <div className="panel-title">
               <ClipboardCopy size={18} />
-              <h2>今日交接摘要</h2>
+              <h2>{handoverShift === '全部' ? '今日交接摘要' : `${handoverShift}交接摘要`}</h2>
+            </div>
+            <div className="handover-shift-tabs">
+              {['全部', '上午', '下午', '夜间'].map((shift) => (
+                <button
+                  key={shift}
+                  type="button"
+                  className={'shift-tab ' + (handoverShift === shift ? 'active' : '')}
+                  onClick={() => setHandoverShift(shift)}
+                >
+                  {shift}
+                </button>
+              ))}
             </div>
             <button
               type="button"
@@ -2195,7 +2213,7 @@ function App() {
             </div>
           )}
           {handoverSummary.focusRecords.length === 0 && (
-            <p className="empty">今日无重点交接事项。</p>
+            <p className="empty">{handoverShift === '全部' ? '今日无重点交接事项。' : `本${handoverShift}无重点交接事项。`}</p>
           )}
         </div>
       </section>

@@ -648,11 +648,24 @@ textarea { min-height: 76px; resize: vertical; }
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 16px;
   margin-bottom: 16px;
+  flex-wrap: wrap;
 }
 
 .handover-header .panel-title {
   margin-bottom: 0;
+}
+
+.handover-shift-tabs {
+  display: inline-flex;
+  border: 1px solid #d0d5dd;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fff;
+  flex: 1;
+  justify-content: center;
+  max-width: 280px;
 }
 
 .copy-btn {
@@ -1568,6 +1581,7 @@ textarea { min-height: 76px; resize: vertical; }
   .modal-header, .modal-body, .modal-footer { padding-left: 14px; padding-right: 14px; }
   .handover-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .handover-header { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .handover-shift-tabs { max-width: 100%; width: 100%; }
   .timeline-toolbar { flex-direction: column; align-items: flex-start; }
   .timeline-header { grid-template-columns: 70px 1fr; }
   .timeline-row { grid-template-columns: 70px 1fr; }
