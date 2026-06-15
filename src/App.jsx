@@ -1298,7 +1298,7 @@ function validateParsed(parsed, existingRecords) {
 function App() {
   const [records, setRecords] = useState(loadRecords);
   const [form, setForm] = useState(appConfig.defaultValues);
-  const [filters, setFilters] = useState({ query: '', status: '全部', date: '', shift: '全部', bed: '全部' });
+  const [filters, setFilters] = useState({ query: '', status: '全部', date: '', shift: '全部', bed: '' });
   const [selected, setSelected] = useState(null);
   const [viewMode, setViewMode] = useState('list');
   const [timelineShift, setTimelineShift] = useState('全部');
@@ -1757,7 +1757,7 @@ function App() {
       .filter((item) => filters.status === '全部' || item.status === filters.status)
       .filter((item) => !filters.date || item.date === filters.date)
       .filter((item) => filters.shift === '全部' || item.shift === filters.shift)
-      .filter((item) => filters.bed === '全部' || item.bed === filters.bed)
+      .filter((item) => !filters.bed || item.bed === filters.bed)
       .sort((a, b) => {
         if (appConfig.sort === 'priority') {
           const rank = priorityRank(a.priority) - priorityRank(b.priority);
@@ -1768,6 +1768,17 @@ function App() {
         return String(aDate).localeCompare(String(bDate));
       });
   }, [records, filters]);
+
+  const filterOptions = useMemo(() => {
+    const dates = [...new Set(records.map((item) => item.date).filter(Boolean))].sort();
+    const beds = [...new Set(records.map((item) => item.bed).filter(Boolean))].sort();
+    const shifts = appConfig.fields.find((f) => f.key === 'shift')?.options || ['上午', '下午', '夜间'];
+    return { dates, beds, shifts };
+  }, [records]);
+
+  const hasActiveFilters = useMemo(() => {
+    return filters.query || filters.status !== '全部' || filters.date || filters.shift !== '全部' || filters.bed;
+  }, [filters]);
 
   const todayRecords = useMemo(() => records.filter((item) => item.date === today), [records]);
 
@@ -1910,11 +1921,13 @@ function App() {
     return startMin < rangeEnd && endMin > rangeStart;
   }
 
-  const timelineDate = today;
+  const timelineDate = filters.date || today;
+
+  const effectiveTimelineShift = filters.shift !== '全部' ? filters.shift : timelineShift;
 
   const timelineRange = useMemo(() => {
-    return SHIFT_TIME_RANGES[timelineShift] || SHIFT_TIME_RANGES['全部'];
-  }, [timelineShift]);
+    return SHIFT_TIME_RANGES[effectiveTimelineShift] || SHIFT_TIME_RANGES['全部'];
+  }, [effectiveTimelineShift]);
 
   const timelineTotalMinutes = useMemo(() => {
     const startMin = timeToMinutes(timelineRange.start);
@@ -2018,23 +2031,7 @@ function App() {
     }, {});
   }, [records]);
 
-  function clearFilters() {
-    setFilters({ query: '', status: '全部', date: '', shift: '全部', bed: '全部' });
-  }
-
-  const hasActiveFilters = filters.query !== '' || filters.status !== '全部' || filters.date !== '' || filters.shift !== '全部' || filters.bed !== '全部';
-
-  const bedOptions = useMemo(() => {
-    const bedField = appConfig.fields.find((f) => f.key === 'bed');
-    const configBeds = bedField?.options || [];
-    const recordBeds = records.map((item) => item.bed).filter(Boolean);
-    return Array.from(new Set([...configBeds, ...recordBeds])).sort();
-  }, [records]);
-
-  const shiftOptions = useMemo(() => {
-    const shiftField = appConfig.fields.find((f) => f.key === 'shift');
-    return shiftField?.options || [];
-  }, []);
+  const operators = useMemo(() => getOperators(records), [records]);
 
   const auditRecords = useMemo(() => {
     return filterAuditRecords(records, auditFilters).map((item) => {
@@ -2340,36 +2337,49 @@ function App() {
           <div className="toolbar">
             <div className="search">
               <Search size={16} />
-              <input value={filters.query} onChange={(event) => setFilters({ ...filters, query: event.target.value })} placeholder={appConfig.filters[0]?.label || '搜索'} />
+              <input value={filters.query} onChange={(event) => setFilters({ ...filters, query: event.target.value })} placeholder={appConfig.filters[0]?.label || '搜索患者/床位'} />
             </div>
-            <select value={filters.status} onChange={(event) => setFilters({ ...filters, status: event.target.value })}>
-              <option>全部</option>
-              {appConfig.statuses.map((status) => <option key={status}>{status}</option>)}
-            </select>
-            <div className="filter-input-wrapper">
-              <Calendar size={14} className="filter-input-icon" />
+            <div className="filter-group">
+              <Filter size={14} className="filter-icon" />
               <input
                 type="date"
                 value={filters.date}
                 onChange={(event) => setFilters({ ...filters, date: event.target.value })}
-                className="filter-date-input"
-                placeholder="选择透析日期"
+                placeholder="透析日期"
+                className="filter-input date-filter"
               />
+              <select
+                value={filters.shift}
+                onChange={(event) => setFilters({ ...filters, shift: event.target.value })}
+                className="filter-select"
+              >
+                <option value="全部">全部班次</option>
+                {filterOptions.shifts.map((shift) => <option key={shift}>{shift}</option>)}
+              </select>
+              <select
+                value={filters.bed}
+                onChange={(event) => setFilters({ ...filters, bed: event.target.value })}
+                className="filter-select"
+              >
+                <option value="">全部床位</option>
+                {filterOptions.beds.map((bed) => <option key={bed}>{bed}</option>)}
+              </select>
+              <select value={filters.status} onChange={(event) => setFilters({ ...filters, status: event.target.value })} className="filter-select">
+                <option>全部状态</option>
+                {appConfig.statuses.map((status) => <option key={status}>{status}</option>)}
+              </select>
+              {hasActiveFilters && (
+                <button
+                  type="button"
+                  className="clear-filter-btn"
+                  onClick={() => setFilters({ query: '', status: '全部', date: '', shift: '全部', bed: '' })}
+                  title="清除所有筛选"
+                >
+                  <X size={14} />
+                  清除
+                </button>
+              )}
             </div>
-            <select value={filters.shift} onChange={(event) => setFilters({ ...filters, shift: event.target.value })}>
-              <option value="全部">全部班次</option>
-              {shiftOptions.map((shift) => <option key={shift}>{shift}</option>)}
-            </select>
-            <select value={filters.bed} onChange={(event) => setFilters({ ...filters, bed: event.target.value })}>
-              <option value="全部">全部床位</option>
-              {bedOptions.map((bed) => <option key={bed}>{bed}</option>)}
-            </select>
-            {hasActiveFilters && (
-              <button type="button" className="clear-filters-btn" onClick={clearFilters} title="清空所有筛选条件">
-                <X size={14} />
-                清空筛选
-              </button>
-            )}
             <div className="view-toggle">
               <button type="button" className={'toggle-btn ' + (!auditViewMode && !patientTrackView && viewMode === 'list' ? 'active' : '')} onClick={() => { setAuditViewMode(false); setPatientTrackView(false); setSelectedPatient(null); setViewMode('list'); }} title="列表视图">
                 <List size={16} />
@@ -2380,53 +2390,14 @@ function App() {
               <button type="button" className={'toggle-btn ' + (!auditViewMode && !patientTrackView && viewMode === 'timeline' ? 'active' : '')} onClick={() => { setAuditViewMode(false); setPatientTrackView(false); setSelectedPatient(null); setViewMode('timeline'); }} title="时间轴视图">
                 <Clock size={16} />
               </button>
-              <button type="button" className={'toggle-btn audit-toggle ' + (auditViewMode ? 'active' : '')} onClick={() => setAuditViewMode(!auditViewMode)} title="状态流转审计">
+              <button type="button" className={'toggle-btn audit-toggle ' + (auditViewMode ? 'active' : '')} onClick={() => { setAuditViewMode(!auditViewMode); if (!auditViewMode) { setPatientTrackView(false); setSelectedPatient(null); setPatientSearchQuery(''); } }} title="状态流转审计">
                 <GitBranch size={16} />
               </button>
-              <button type="button" className={'toggle-btn patient-track-toggle ' + (patientTrackView ? 'active' : '')} onClick={() => { setPatientTrackView(!patientTrackView); if (patientTrackView) { setSelectedPatient(null); setPatientSearchQuery(''); } }} title="患者连续排班追踪">
+              <button type="button" className={'toggle-btn patient-track-toggle ' + (patientTrackView ? 'active' : '')} onClick={() => { setPatientTrackView(!patientTrackView); if (patientTrackView) { setSelectedPatient(null); setPatientSearchQuery(''); } else { setAuditViewMode(false); } }} title="患者连续排班追踪">
                 <Activity size={16} />
               </button>
             </div>
           </div>
-
-          {hasActiveFilters && (
-            <div className="active-filters-bar">
-              <span className="active-filters-label">当前筛选：</span>
-              <div className="active-filters-tags">
-                {filters.query && (
-                  <span className="filter-tag">
-                    <Search size={10} />关键词: {filters.query}
-                    <button onClick={() => setFilters({ ...filters, query: '' })}><X size={10} /></button>
-                  </span>
-                )}
-                {filters.status !== '全部' && (
-                  <span className="filter-tag">
-                    状态: {filters.status}
-                    <button onClick={() => setFilters({ ...filters, status: '全部' })}><X size={10} /></button>
-                  </span>
-                )}
-                {filters.date && (
-                  <span className="filter-tag">
-                    <Calendar size={10} />日期: {filters.date}
-                    <button onClick={() => setFilters({ ...filters, date: '' })}><X size={10} /></button>
-                  </span>
-                )}
-                {filters.shift !== '全部' && (
-                  <span className="filter-tag">
-                    班次: {filters.shift}
-                    <button onClick={() => setFilters({ ...filters, shift: '全部' })}><X size={10} /></button>
-                  </span>
-                )}
-                {filters.bed !== '全部' && (
-                  <span className="filter-tag">
-                    <Bed size={10} />床位: {filters.bed}
-                    <button onClick={() => setFilters({ ...filters, bed: '全部' })}><X size={10} /></button>
-                  </span>
-                )}
-              </div>
-              <span className="filter-result-count">共 {filteredRecords.length} 条记录</span>
-            </div>
-          )}
 
           {patientTrackView ? (
             <div className="patient-track-panel">
@@ -2718,29 +2689,26 @@ function App() {
               </div>
             </div>
           ) : viewMode === 'list' ? (
-            filteredRecords.length === 0 ? (
-              <div className="empty-state">
-                <div className="empty-state-icon">
-                  <ClipboardList size={48} />
+            <div className="records">
+              {filteredRecords.length === 0 ? (
+                <div className="empty-state">
+                  <div className="empty-state-icon">
+                    <Search size={48} strokeWidth={1} />
+                  </div>
+                  <h3>{hasActiveFilters ? '没有找到匹配的记录' : '暂无排班记录'}</h3>
+                  <p>{hasActiveFilters ? '请尝试调整筛选条件，或点击「清除」按钮重置所有筛选' : '点击右上角「添加」按钮创建第一条排班记录'}</p>
+                  {hasActiveFilters && (
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={() => setFilters({ query: '', status: '全部', date: '', shift: '全部', bed: '' })}
+                    >
+                      清除所有筛选条件
+                    </button>
+                  )}
                 </div>
-                <h3 className="empty-state-title">
-                  {hasActiveFilters ? '没有找到匹配的记录' : '暂无排班记录'}
-                </h3>
-                <p className="empty-state-desc">
-                  {hasActiveFilters
-                    ? '请尝试调整筛选条件或点击「清空筛选」查看所有记录'
-                    : '使用左侧表单添加第一条透析排班记录'}
-                </p>
-                {hasActiveFilters && (
-                  <button type="button" className="empty-state-action" onClick={clearFilters}>
-                    <RotateCcw size={16} />
-                    清空所有筛选条件
-                  </button>
-                )}
-              </div>
-            ) : (
-              <div className="records">
-                {filteredRecords.map((item) => {
+              ) : (
+                filteredRecords.map((item) => {
                   const violations = getRecordViolations(item);
                   const hasErrors = violations.some((v) => v.severity === RULE_SEVERITY.ERROR);
                   const hasWarnings = violations.some((v) => v.severity === RULE_SEVERITY.WARNING);
@@ -2772,28 +2740,25 @@ function App() {
                       </div>
                     </article>
                   );
-                })}
-              </div>
-            )
+                })
+              )}
+            </div>
           ) : viewMode === 'calendar' ? (
             <div className="calendar-wrap">
-              {filteredRecords.length === 0 ? (
+              {calendarDates.length === 0 || calendarBeds.length === 0 ? (
                 <div className="empty-state">
                   <div className="empty-state-icon">
-                    <LayoutGrid size={48} />
+                    <LayoutGrid size={48} strokeWidth={1} />
                   </div>
-                  <h3 className="empty-state-title">
-                    {hasActiveFilters ? '没有找到匹配的排班记录' : '暂无排班数据'}
-                  </h3>
-                  <p className="empty-state-desc">
-                    {hasActiveFilters
-                      ? '请尝试调整筛选条件或点击「清空筛选」查看所有排班日历'
-                      : '使用左侧表单添加排班记录后，日历视图将自动展示床位安排'}
-                  </p>
+                  <h3>{hasActiveFilters ? '没有找到匹配的排班' : '暂无排班数据'}</h3>
+                  <p>{hasActiveFilters ? '当前筛选条件下没有找到排班记录，请调整筛选条件' : '添加排班记录后即可在日历视图中查看'}</p>
                   {hasActiveFilters && (
-                    <button type="button" className="empty-state-action" onClick={clearFilters}>
-                      <RotateCcw size={16} />
-                      清空所有筛选条件
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={() => setFilters({ query: '', status: '全部', date: '', shift: '全部', bed: '' })}
+                    >
+                      清除所有筛选条件
                     </button>
                   )}
                 </div>
@@ -2861,39 +2826,34 @@ function App() {
                     <button
                       key={shift}
                       type="button"
-                      className={'shift-tab ' + (timelineShift === shift ? 'active' : '')}
-                      onClick={() => setTimelineShift(shift)}
+                      className={'shift-tab ' + (effectiveTimelineShift === shift ? 'active' : '')}
+                      onClick={() => { setTimelineShift(shift); setFilters({ ...filters, shift }); }}
                     >
                       {shift}
                     </button>
                   ))}
                 </div>
                 <div className="timeline-date-info">
-                  <span>今日：{timelineDate}</span>
+                  <span>{filters.date ? '筛选日期：' + timelineDate : '今日：' + timelineDate}</span>
                 </div>
               </div>
-              {filteredRecords.length === 0 ? (
+              {timelineBeds.length === 0 ? (
                 <div className="empty-state">
                   <div className="empty-state-icon">
-                    <Clock size={48} />
+                    <Clock size={48} strokeWidth={1} />
                   </div>
-                  <h3 className="empty-state-title">
-                    {hasActiveFilters ? '没有找到匹配的时间轴记录' : '暂无时间轴数据'}
-                  </h3>
-                  <p className="empty-state-desc">
-                    {hasActiveFilters
-                      ? '请尝试调整筛选条件或点击「清空筛选」查看完整的时间轴安排'
-                      : '使用左侧表单添加排班记录后，时间轴视图将展示今日床位的时间分布'}
-                  </p>
+                  <h3>{hasActiveFilters ? '没有找到匹配的排班' : '暂无床位数据'}</h3>
+                  <p>{hasActiveFilters ? '当前筛选条件下没有找到排班记录，请调整筛选条件' : '添加排班记录后即可在时间轴视图中查看'}</p>
                   {hasActiveFilters && (
-                    <button type="button" className="empty-state-action" onClick={clearFilters}>
-                      <RotateCcw size={16} />
-                      清空所有筛选条件
+                    <button
+                      type="button"
+                      className="primary"
+                      onClick={() => setFilters({ query: '', status: '全部', date: '', shift: '全部', bed: '' })}
+                    >
+                      清除所有筛选条件
                     </button>
                   )}
                 </div>
-              ) : timelineBeds.length === 0 ? (
-                <p className="empty">暂无床位数据</p>
               ) : (
                 <div className="timeline-container">
                   <div className="timeline-header">
