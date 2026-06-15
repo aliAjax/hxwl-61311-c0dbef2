@@ -473,6 +473,35 @@ textarea { min-height: 76px; resize: vertical; }
   font-weight: 600;
 }
 
+.preview-input {
+  width: 100%;
+  min-width: 90px;
+  padding: 5px 8px;
+  border: 1px solid #d0d5dd;
+  border-radius: 5px;
+  background: #fff;
+  font-size: 13px;
+  transition: border-color .15s, box-shadow .15s;
+}
+.preview-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.12);
+}
+.cell-bad .preview-input {
+  border-color: #fca5a5;
+  background: #fff;
+  color: #b91c1c;
+}
+.cell-bad .preview-input:focus {
+  border-color: #ef4444;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.12);
+}
+.row-error .preview-input,
+.row-warning .preview-input {
+  background: #fff;
+}
+
 .validate-cell { min-width: 180px; }
 .tag {
   display: inline-flex;

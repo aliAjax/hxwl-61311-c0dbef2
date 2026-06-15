@@ -1231,6 +1231,68 @@ function parsePasteText(text) {
   return result;
 }
 
+function validateSingleRow(row, allRows, existingRecords, currentIndex) {
+  const errors = [];
+  const warnings = [];
+
+  if (!String(row.patient || '').trim()) errors.push('缺少患者');
+  if (!String(row.date || '').trim()) errors.push('缺少日期');
+  if (!String(row.shift || '').trim()) errors.push('缺少班次');
+  if (!String(row.bed || '').trim()) errors.push('缺少床位');
+  if (!String(row.start || '').trim()) errors.push('缺少开始时间');
+  if (!String(row.end || '').trim()) errors.push('缺少结束时间');
+
+  if (row.date && !DATE_REGEX.test(normalizeDate(row.date))) {
+    errors.push('日期格式错误');
+  }
+  if (row.start && !isValidTime(row.start)) {
+    errors.push('开始时间格式错误');
+  }
+  if (row.end && !isValidTime(row.end)) {
+    errors.push('结束时间格式错误');
+  }
+  if (row.start && row.end && isValidTime(row.start) && isValidTime(row.end) && !(normalizeTime(row.start) < normalizeTime(row.end))) {
+    if (String(row.shift || '').trim() !== '夜间') {
+      errors.push('开始时间须早于结束时间（非夜间班次不允许跨日）');
+    }
+  }
+
+  const normalized = {
+    ...row,
+    date: normalizeDate(row.date),
+    start: normalizeTime(row.start),
+    end: normalizeTime(row.end),
+    status: row.status || appConfig.primaryStatus
+  };
+
+  if (errors.length === 0) {
+    const overlapExisting = existingRecords.some((item) =>
+      item.bed === normalized.bed &&
+      item.date === normalized.date &&
+      timeRangeOverlaps(normalized.start, normalized.end, item.start, item.end)
+    );
+    const overlapInBatch = allRows.some((other, idx) => {
+      if (idx === currentIndex) return false;
+      const od = normalizeDate(other.date);
+      const os = normalizeTime(other.start);
+      const oe = normalizeTime(other.end);
+      const ob = String(other.bed || '').trim();
+      if (!ob || !od || !os || !oe) return false;
+      return ob === normalized.bed && od === normalized.date && timeRangeOverlaps(normalized.start, normalized.end, os, oe);
+    });
+    if (overlapExisting || overlapInBatch) {
+      warnings.push('床位时间重叠');
+    }
+  }
+
+  return {
+    row: normalized,
+    errors,
+    warnings,
+    valid: errors.length === 0
+  };
+}
+
 function validateParsed(parsed, existingRecords) {
   return parsed.map((row) => {
     const errors = [];
@@ -1353,6 +1415,26 @@ function App() {
     const parsed = parsePasteText(importText);
     const validated = validateParsed(parsed, records);
     setParsedPreview(validated);
+  }
+
+  function handlePreviewFieldChange(index, field, value) {
+    setParsedPreview((prev) => {
+      const newPreview = [...prev];
+      const currentRow = { ...newPreview[index].row, [field]: value };
+      const allRows = newPreview.map((p, i) => (i === index ? currentRow : p.row));
+      const validatedRow = validateSingleRow(currentRow, allRows, records, index);
+      newPreview[index] = validatedRow;
+
+      const revalidatedPreview = newPreview.map((p, i) => {
+        if (i === index) return p;
+        const otherRow = p.row;
+        const otherAllRows = newPreview.map((np, ni) => (ni === i ? otherRow : (ni === index ? currentRow : np.row)));
+        const revalidated = validateSingleRow(otherRow, otherAllRows, records, i);
+        return revalidated;
+      });
+
+      return revalidatedPreview;
+    });
   }
 
   function handleConfirmImport() {
@@ -3188,13 +3270,74 @@ function App() {
                         {parsedPreview.map((p, idx) => (
                           <tr key={idx} className={!p.valid ? 'row-error' : (p.warnings.length > 0 ? 'row-warning' : 'row-ok')}>
                             <td>{p.row.lineNo ?? idx + 1}</td>
-                            <td className={!String(p.row.patient || '').trim() ? 'cell-bad' : ''}>{p.row.patient || '-'}</td>
-                            <td className={!String(p.row.date || '').trim() || !DATE_REGEX.test(p.row.date) ? 'cell-bad' : ''}>{p.row.date || '-'}</td>
-                            <td className={!String(p.row.shift || '').trim() ? 'cell-bad' : ''}>{p.row.shift || '-'}</td>
-                            <td className={!String(p.row.bed || '').trim() ? 'cell-bad' : ''}>{p.row.bed || '-'}</td>
-                            <td className={!String(p.row.start || '').trim() || !isValidTime(p.row.start) ? 'cell-bad' : ''}>{p.row.start || '-'}</td>
-                            <td className={!String(p.row.end || '').trim() || !isValidTime(p.row.end) || (isValidTime(p.row.start) && isValidTime(p.row.end) && !(p.row.start < p.row.end)) ? 'cell-bad' : ''}>{p.row.end || '-'}</td>
-                            <td>{p.row.status || '-'}</td>
+                            <td className={!String(p.row.patient || '').trim() ? 'cell-bad' : ''}>
+                              <input
+                                type="text"
+                                className="preview-input"
+                                value={p.row.patient || ''}
+                                onChange={(e) => handlePreviewFieldChange(idx, 'patient', e.target.value)}
+                                placeholder="患者姓名"
+                              />
+                            </td>
+                            <td className={!String(p.row.date || '').trim() || !DATE_REGEX.test(p.row.date) ? 'cell-bad' : ''}>
+                              <input
+                                type="date"
+                                className="preview-input"
+                                value={p.row.date || ''}
+                                onChange={(e) => handlePreviewFieldChange(idx, 'date', e.target.value)}
+                              />
+                            </td>
+                            <td className={!String(p.row.shift || '').trim() ? 'cell-bad' : ''}>
+                              <select
+                                className="preview-input"
+                                value={p.row.shift || ''}
+                                onChange={(e) => handlePreviewFieldChange(idx, 'shift', e.target.value)}
+                              >
+                                <option value="">选择班次</option>
+                                {appConfig.fields.find(f => f.key === 'shift').options.map((opt) => (
+                                  <option key={opt} value={opt}>{opt}</option>
+                                ))}
+                              </select>
+                            </td>
+                            <td className={!String(p.row.bed || '').trim() ? 'cell-bad' : ''}>
+                              <select
+                                className="preview-input"
+                                value={p.row.bed || ''}
+                                onChange={(e) => handlePreviewFieldChange(idx, 'bed', e.target.value)}
+                              >
+                                <option value="">选择床位</option>
+                                {appConfig.fields.find(f => f.key === 'bed').options.map((opt) => (
+                                  <option key={opt} value={opt}>{opt}</option>
+                                ))}
+                              </select>
+                            </td>
+                            <td className={!String(p.row.start || '').trim() || !isValidTime(p.row.start) ? 'cell-bad' : ''}>
+                              <input
+                                type="time"
+                                className="preview-input"
+                                value={p.row.start || ''}
+                                onChange={(e) => handlePreviewFieldChange(idx, 'start', e.target.value)}
+                              />
+                            </td>
+                            <td className={!String(p.row.end || '').trim() || !isValidTime(p.row.end) || (isValidTime(p.row.start) && isValidTime(p.row.end) && !(p.row.start < p.row.end)) ? 'cell-bad' : ''}>
+                              <input
+                                type="time"
+                                className="preview-input"
+                                value={p.row.end || ''}
+                                onChange={(e) => handlePreviewFieldChange(idx, 'end', e.target.value)}
+                              />
+                            </td>
+                            <td>
+                              <select
+                                className="preview-input"
+                                value={p.row.status || appConfig.primaryStatus}
+                                onChange={(e) => handlePreviewFieldChange(idx, 'status', e.target.value)}
+                              >
+                                {appConfig.statuses.map((opt) => (
+                                  <option key={opt} value={opt}>{opt}</option>
+                                ))}
+                              </select>
+                            </td>
                             <td className="validate-cell">
                               {p.errors.map((e, i) => <span key={i} className="tag tag-error"><AlertCircle size={12} />{e}</span>)}
                               {p.warnings.map((w, i) => <span key={i} className="tag tag-warn"><AlertTriangle size={12} />{w}</span>)}
