@@ -899,7 +899,7 @@ const RECOMMEND_TYPES = {
   ADJACENT_SHIFT_BED: 'adjacent_shift_bed'
 };
 
-function generateBedRecommendations(target, records) {
+function generateBedRecommendations(target, records, violations = []) {
   if (!target.date || !target.start || !target.end || !target.shift) return [];
 
   const allBeds = [];
@@ -916,7 +916,38 @@ function generateBedRecommendations(target, records) {
   const shiftStart = timeToMinutes(shiftRange.start);
   const shiftEnd = timeToMinutes(shiftRange.end);
 
+  const hasCleaningViolation = violations.some((v) => v.ruleId === RULE_IDS.CLEANING_BED_REASSIGNED);
+  const hasOverlapViolation = violations.some((v) => v.ruleId === RULE_IDS.BED_TIME_OVERLAP);
+
   const recs = [];
+
+  if (hasCleaningViolation && !hasOverlapViolation) {
+    const cleaningRecords = records.filter((item) =>
+      item.bed === target.bed &&
+      item.date === target.date &&
+      item.id !== target.id &&
+      item.status === '清洁中'
+    );
+    for (const cr of cleaningRecords) {
+      if (!cr.end) continue;
+      const crEnd = timeToMinutes(cr.end);
+      const minStartAfterCleaning = crEnd + 30;
+      if (minStartAfterCleaning > targetStart && minStartAfterCleaning + durationMin <= shiftEnd) {
+        const delayMinutes = minStartAfterCleaning - targetStart;
+        const adjustedStart = minStartAfterCleaning;
+        const adjustedEnd = adjustedStart + durationMin;
+        recs.push({
+          type: RECOMMEND_TYPES.ADJUST_START_TIME,
+          bed: target.bed,
+          start: minutesToTime(adjustedStart),
+          end: minutesToTime(adjustedEnd),
+          shift: target.shift,
+          reason: `床位 ${target.bed} 需延后 ${delayMinutes} 分钟开始（${minutesToTime(adjustedStart)}），确保 ${cr.patient} 结束后有 30 分钟清洁缓冲时间`,
+          score: 90
+        });
+      }
+    }
+  }
 
   for (const bed of allBeds) {
     const sameDateRecords = records.filter((r) => r.date === target.date && r.bed === bed && r.id !== target.id);
@@ -1733,6 +1764,8 @@ function App() {
     setForm(appConfig.defaultValues);
   }
 
+  const [adoptedRecommendation, setAdoptedRecommendation] = useState(null);
+
   function applyRecommendation(rec) {
     setForm({
       ...form,
@@ -1741,6 +1774,11 @@ function App() {
       start: rec.start,
       end: rec.end
     });
+    setAdoptedRecommendation({
+      ...rec,
+      adoptedAt: Date.now()
+    });
+    setTimeout(() => setAdoptedRecommendation(null), 2000);
   }
 
   const recordViolationsMap = useMemo(() => aggregateRecordsViolations(records), [records]);
@@ -1777,14 +1815,23 @@ function App() {
     return hasOverlap(target, records);
   }, [form, records, editing]);
 
+  const formHasCleaningWarning = useMemo(() => {
+    return formViolations.some((v) => v.ruleId === RULE_IDS.CLEANING_BED_REASSIGNED);
+  }, [formViolations]);
+
+  const shouldShowRecommendations = useMemo(() => {
+    return formHasConflict || formHasCleaningWarning;
+  }, [formHasConflict, formHasCleaningWarning]);
+
   const formHasSevereViolation = useMemo(() => formViolations.some((v) => v.severity === RULE_SEVERITY.ERROR), [formViolations]);
   const formHasWarning = useMemo(() => formViolations.some((v) => v.severity === RULE_SEVERITY.WARNING), [formViolations]);
 
   const smartRecommendations = useMemo(() => {
-    if (!formHasConflict) return [];
+    if (!shouldShowRecommendations) return [];
     const target = editing ? { ...form, id: editing.id } : { ...form, id: '_new_' };
-    return generateBedRecommendations(target, records);
-  }, [form, records, editing, formHasConflict]);
+    const violations = formViolations;
+    return generateBedRecommendations(target, records, violations);
+  }, [form, records, editing, shouldShowRecommendations, formViolations]);
 
   function updateStatus(id, status) {
     const next = records.map((item) => item.id === id ? {
@@ -2386,12 +2433,18 @@ function App() {
             )}
             <p className="hint">{appConfig.note}</p>
 
-            {formHasConflict && (
+            {shouldShowRecommendations && (
               <div className="smart-suggestion-panel">
                 <div className="suggestion-header">
                   <div className="suggestion-title">
                     <Sparkles size={16} />
-                    <h3>检测到床位冲突 · 智能改床建议</h3>
+                    <h3>
+                      {formHasConflict && formHasCleaningWarning
+                        ? '检测到床位冲突与清洁缓冲不足 · 智能调整方案'
+                        : formHasConflict
+                          ? '检测到床位重叠 · 智能改床建议'
+                          : '检测到清洁缓冲不足 · 智能时间调整建议'}
+                    </h3>
                   </div>
                   <span className="suggestion-count">{smartRecommendations.length} 条方案</span>
                 </div>
@@ -2416,8 +2469,16 @@ function App() {
                           </div>
                           <p className="suggestion-reason">{rec.reason}</p>
                         </div>
-                        <button type="button" className="apply-suggestion-btn" onClick={() => applyRecommendation(rec)}>
-                          <CheckCheck size={14} />采用此方案
+                        <button
+                          type="button"
+                          className={'apply-suggestion-btn' + (adoptedRecommendation && adoptedRecommendation.bed === rec.bed && adoptedRecommendation.start === rec.start ? ' adopted' : '')}
+                          onClick={() => applyRecommendation(rec)}
+                        >
+                          {adoptedRecommendation && adoptedRecommendation.bed === rec.bed && adoptedRecommendation.start === rec.start ? (
+                            <><CheckCircle2 size={14} />已采纳，正在校验...</>
+                          ) : (
+                            <><CheckCheck size={14} />采用此方案</>
+                          )}
                         </button>
                       </div>
                     ))}
