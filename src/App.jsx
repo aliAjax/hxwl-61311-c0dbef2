@@ -869,11 +869,31 @@ function minutesToTime(minutes) {
 function getBedOccupancies(bed, date, records, excludeId) {
   return records
     .filter((item) => item.bed === bed && item.date === date && item.id !== excludeId)
-    .map((item) => ({ start: timeToMinutes(item.start), end: timeToMinutes(item.end), patient: item.patient, id: item.id }))
+    .map((item) => ({ start: timeToMinutes(item.start), end: timeToMinutes(item.end), patient: item.patient, id: item.id, status: item.status }))
     .sort((a, b) => a.start - b.start);
 }
 
-function findGapsOnBed(bed, date, records, durationMin, excludeId) {
+function isSlotValid(bed, date, startMin, endMin, records, excludeId) {
+  const sameBedRecords = records.filter((item) =>
+    item.bed === bed && item.date === date && item.id !== excludeId
+  );
+  for (const r of sameBedRecords) {
+    const rStart = timeToMinutes(r.start);
+    const rEnd = timeToMinutes(r.end);
+    if (startMin < rEnd && endMin > rStart) {
+      return { valid: false, reason: `与 ${r.patient}(${r.start}-${r.end}) 时间重叠` };
+    }
+    if (r.status === '清洁中') {
+      const minStartAfterCleaning = rEnd + 30;
+      if (startMin < minStartAfterCleaning) {
+        return { valid: false, reason: `${r.patient} 结束后需 30 分钟清洁缓冲` };
+      }
+    }
+  }
+  return { valid: true };
+}
+
+function findGapsOnBed(bed, date, records, durationMin, excludeId, cleaningBuffer = 30) {
   const occupancies = getBedOccupancies(bed, date, records, excludeId);
   const gaps = [];
   const dayStart = timeToMinutes('06:00');
@@ -881,10 +901,11 @@ function findGapsOnBed(bed, date, records, durationMin, excludeId) {
 
   let cursor = dayStart;
   for (const occ of occupancies) {
+    const occAvailableAfter = occ.end + cleaningBuffer;
     if (occ.start > cursor && occ.start - cursor >= durationMin) {
       gaps.push({ start: cursor, end: occ.start });
     }
-    cursor = Math.max(cursor, occ.end);
+    cursor = Math.max(cursor, occAvailableAfter);
   }
   if (dayEnd > cursor && dayEnd - cursor >= durationMin) {
     gaps.push({ start: cursor, end: dayEnd });
@@ -913,38 +934,49 @@ function generateBedRecommendations(target, records, violations = []) {
   const targetStart = timeToMinutes(target.start);
   const targetEnd = timeToMinutes(target.end);
   const shiftRange = SHIFT_TIME_RANGES[target.shift];
-  const shiftStart = timeToMinutes(shiftRange.start);
   const shiftEnd = timeToMinutes(shiftRange.end);
 
   const hasCleaningViolation = violations.some((v) => v.ruleId === RULE_IDS.CLEANING_BED_REASSIGNED);
-  const hasOverlapViolation = violations.some((v) => v.ruleId === RULE_IDS.BED_TIME_OVERLAP);
 
   const recs = [];
 
-  if (hasCleaningViolation && !hasOverlapViolation) {
+  if (hasCleaningViolation) {
     const cleaningRecords = records.filter((item) =>
       item.bed === target.bed &&
       item.date === target.date &&
       item.id !== target.id &&
       item.status === '清洁中'
     );
+    const sameBedOtherRecords = records.filter((item) =>
+      item.bed === target.bed &&
+      item.date === target.date &&
+      item.id !== target.id
+    );
     for (const cr of cleaningRecords) {
       if (!cr.end) continue;
       const crEnd = timeToMinutes(cr.end);
       const minStartAfterCleaning = crEnd + 30;
       if (minStartAfterCleaning > targetStart && minStartAfterCleaning + durationMin <= shiftEnd) {
-        const delayMinutes = minStartAfterCleaning - targetStart;
         const adjustedStart = minStartAfterCleaning;
         const adjustedEnd = adjustedStart + durationMin;
-        recs.push({
-          type: RECOMMEND_TYPES.ADJUST_START_TIME,
-          bed: target.bed,
-          start: minutesToTime(adjustedStart),
-          end: minutesToTime(adjustedEnd),
-          shift: target.shift,
-          reason: `床位 ${target.bed} 需延后 ${delayMinutes} 分钟开始（${minutesToTime(adjustedStart)}），确保 ${cr.patient} 结束后有 30 分钟清洁缓冲时间`,
-          score: 90
+        const hasOtherConflict = sameBedOtherRecords.some((other) => {
+          if (other.id === cr.id) return false;
+          const otherStart = timeToMinutes(other.start);
+          const otherEnd = timeToMinutes(other.end);
+          return adjustedStart < otherEnd && adjustedEnd > otherStart;
         });
+        if (!hasOtherConflict) {
+          const delayMinutes = minStartAfterCleaning - targetStart;
+          recs.push({
+            type: RECOMMEND_TYPES.ADJUST_START_TIME,
+            bed: target.bed,
+            start: minutesToTime(adjustedStart),
+            end: minutesToTime(adjustedEnd),
+            shift: target.shift,
+            reason: `床位 ${target.bed} 需延后 ${delayMinutes} 分钟开始（${minutesToTime(adjustedStart)}），确保 ${cr.patient} 结束后有 30 分钟清洁缓冲时间`,
+            score: 90
+          });
+        }
       }
     }
   }
@@ -953,65 +985,61 @@ function generateBedRecommendations(target, records, violations = []) {
     const sameDateRecords = records.filter((r) => r.date === target.date && r.bed === bed && r.id !== target.id);
     const sameShiftRecords = sameDateRecords.filter((r) => r.shift === target.shift);
 
-    if (sameShiftRecords.length === 0) {
-      const bedOccupied = sameDateRecords.some((r) =>
-        target.start < r.end && target.end > r.start
-      );
-      if (!bedOccupied) {
-        recs.push({
-          type: RECOMMEND_TYPES.SAME_SHIFT_FREE_BED,
-          bed,
-          start: target.start,
-          end: target.end,
-          shift: target.shift,
-          reason: `同日期同班次「${target.shift}」空闲，时间段 ${target.start}-${target.end} 完全可用`,
-          score: 100
-        });
-      }
+    const slotCheck = isSlotValid(bed, target.date, targetStart, targetEnd, records, target.id);
+
+    if (sameShiftRecords.length === 0 && slotCheck.valid) {
+      recs.push({
+        type: RECOMMEND_TYPES.SAME_SHIFT_FREE_BED,
+        bed,
+        start: target.start,
+        end: target.end,
+        shift: target.shift,
+        reason: `同日期同班次「${target.shift}」空闲，时间段 ${target.start}-${target.end} 完全可用`,
+        score: 100
+      });
     }
 
-    const hasOverlapOnBed = sameDateRecords.some((r) =>
-      target.start < r.end && target.end > r.start
-    );
-    if (!hasOverlapOnBed && !recs.find((r) => r.type === RECOMMEND_TYPES.SAME_SHIFT_FREE_BED && r.bed === bed)) {
+    if (slotCheck.valid && !recs.find((r) => r.type === RECOMMEND_TYPES.SAME_SHIFT_FREE_BED && r.bed === bed)) {
       recs.push({
         type: RECOMMEND_TYPES.TIME_SLOT_FREE_BED,
         bed,
         start: target.start,
         end: target.end,
         shift: target.shift,
-        reason: `${target.date} 时间段 ${target.start}-${target.end} 不重叠，床位 ${bed} 可用`,
+        reason: `${target.date} 时间段 ${target.start}-${target.end} 合规可用（含清洁缓冲），床位 ${bed} 空闲`,
         score: 85
       });
     }
 
     const gaps = findGapsOnBed(bed, target.date, records, durationMin, target.id);
     for (const gap of gaps) {
-      const gapWithinShift = gap.start >= shiftStart && gap.end <= shiftEnd;
       const adjustedStart = Math.max(gap.start, targetStart);
       const adjustedEnd = adjustedStart + durationMin;
       if (adjustedEnd <= gap.end && adjustedEnd <= shiftEnd) {
-        const startDiff = adjustedStart - targetStart;
-        if (startDiff > 0 && startDiff <= 120) {
-          recs.push({
-            type: RECOMMEND_TYPES.ADJUST_START_TIME,
-            bed,
-            start: minutesToTime(adjustedStart),
-            end: minutesToTime(adjustedEnd),
-            shift: target.shift,
-            reason: `${bed} 只需将开始时间从 ${target.start} 调整至 ${minutesToTime(adjustedStart)}（延后 ${startDiff} 分钟），即可避开冲突`,
-            score: 70 - startDiff
-          });
-        } else if (startDiff < 0 && Math.abs(startDiff) <= 60) {
-          recs.push({
-            type: RECOMMEND_TYPES.ADJUST_START_TIME,
-            bed,
-            start: minutesToTime(adjustedStart),
-            end: minutesToTime(adjustedEnd),
-            shift: target.shift,
-            reason: `${bed} 只需将开始时间从 ${target.start} 调整至 ${minutesToTime(adjustedStart)}（提前 ${Math.abs(startDiff)} 分钟），即可避开冲突`,
-            score: 70 - Math.abs(startDiff)
-          });
+        const gapSlotCheck = isSlotValid(bed, target.date, adjustedStart, adjustedEnd, records, target.id);
+        if (gapSlotCheck.valid) {
+          const startDiff = adjustedStart - targetStart;
+          if (startDiff > 0 && startDiff <= 120) {
+            recs.push({
+              type: RECOMMEND_TYPES.ADJUST_START_TIME,
+              bed,
+              start: minutesToTime(adjustedStart),
+              end: minutesToTime(adjustedEnd),
+              shift: target.shift,
+              reason: `${bed} 只需将开始时间从 ${target.start} 调整至 ${minutesToTime(adjustedStart)}（延后 ${startDiff} 分钟），即可避开冲突并满足清洁缓冲`,
+              score: 70 - startDiff
+            });
+          } else if (startDiff < 0 && Math.abs(startDiff) <= 60) {
+            recs.push({
+              type: RECOMMEND_TYPES.ADJUST_START_TIME,
+              bed,
+              start: minutesToTime(adjustedStart),
+              end: minutesToTime(adjustedEnd),
+              shift: target.shift,
+              reason: `${bed} 只需将开始时间从 ${target.start} 调整至 ${minutesToTime(adjustedStart)}（提前 ${Math.abs(startDiff)} 分钟），即可避开冲突`,
+              score: 70 - Math.abs(startDiff)
+            });
+          }
         }
       }
     }
@@ -1035,20 +1063,15 @@ function generateBedRecommendations(target, records, violations = []) {
         const suggestedEnd = suggestedStart + durationMin;
         if (suggestedEnd > otherEnd) continue;
 
-        const allSameBedRecords = records.filter(
-          (r) => r.date === target.date && r.bed === bed && r.id !== target.id
-        );
-        const hasConflict = allSameBedRecords.some(
-          (r) => suggestedStart < timeToMinutes(r.end) && suggestedEnd > timeToMinutes(r.start)
-        );
-        if (!hasConflict) {
+        const shiftSlotCheck = isSlotValid(bed, target.date, suggestedStart, suggestedEnd, records, target.id);
+        if (shiftSlotCheck.valid) {
           recs.push({
             type: RECOMMEND_TYPES.ADJACENT_SHIFT_BED,
             bed,
             start: minutesToTime(suggestedStart),
             end: minutesToTime(suggestedEnd),
             shift: otherShift,
-            reason: `${bed} 可调整至「${otherShift}」班次，时间段 ${minutesToTime(suggestedStart)}-${minutesToTime(suggestedEnd)} 空闲`,
+            reason: `${bed} 可调整至「${otherShift}」班次，时间段 ${minutesToTime(suggestedStart)}-${minutesToTime(suggestedEnd)} 空闲且合规`,
             score: 55
           });
           break;
