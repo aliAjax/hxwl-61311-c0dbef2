@@ -2538,15 +2538,13 @@ function App() {
                     const isCurrent = status === editing.status;
                     const isRegression = targetOrder < currentOrder && currentOrder !== -1 && targetOrder !== -1;
                     const isSkipCleaning = editing.status === '透析中' && status === '已完成';
-                    const isAbnormal = isCurrent || isRegression || isSkipCleaning;
-
                     let label = status;
                     if (isNext) label = status + '  ✓ 下一步';
                     else if (isRegression) label = status + '  ⚠ 倒退';
                     else if (isSkipCleaning) label = status + '  ⚠ 跳过清洁';
                     else if (isCurrent) label = status + '  ○ 当前';
 
-                    return <option key={status}>{label}</option>;
+                    return <option key={status} value={status}>{label}</option>;
                   })}
                 </select>
               </label>
