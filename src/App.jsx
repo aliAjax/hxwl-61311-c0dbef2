@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback, useRef } from 'react';
+import { useMemo, useState, useCallback, useRef, useEffect } from 'react';
 import { Bed, Plus, Search, Trash2, RotateCcw, CheckCircle2, AlertTriangle, ClipboardList, CalendarDays, Upload, FileText, X, AlertCircle, CheckCheck, LayoutGrid, List, ClipboardCopy, Clock, GitBranch, User, Calendar, Filter, ArrowRightLeft, AlertOctagon, History, Sparkles, Wand2, Save, Edit2, Activity, ChevronRight, ArrowLeft, Download, Database, HardDriveUpload } from 'lucide-react';
 import './App.css';
 
@@ -1098,6 +1098,26 @@ const ABNORMAL_TYPES = {
   SKIP_CLEANING: 'skip_cleaning'
 };
 
+function validateTransition(currentStatus, nextStatus) {
+  const currentOrder = STATUS_ORDER[currentStatus] ?? -1;
+  const nextOrder = STATUS_ORDER[nextStatus] ?? -1;
+  const warnings = [];
+
+  if (nextStatus === currentStatus) {
+    warnings.push({ type: ABNORMAL_TYPES.REPEATED, label: '重复点击', description: `当前已为「${currentStatus}」状态，重复点击相同状态` });
+  }
+
+  if (nextOrder < currentOrder && currentOrder !== -1 && nextOrder !== -1) {
+    warnings.push({ type: ABNORMAL_TYPES.REGRESSION, label: '状态倒退', description: `从「${currentStatus}」倒退至「${nextStatus}」，正常顺序为：待到达→透析中→清洁中→已完成` });
+  }
+
+  if (currentStatus === '透析中' && nextStatus === '已完成') {
+    warnings.push({ type: ABNORMAL_TYPES.SKIP_CLEANING, label: '跳过清洁', description: '从「透析中」直接变为「已完成」，跳过了「清洁中」环节，请确认是否合理' });
+  }
+
+  return warnings;
+}
+
 function analyzeTimeline(timeline) {
   if (!timeline || timeline.length === 0) {
     return { steps: [], abnormalities: [] };
@@ -1120,7 +1140,8 @@ function analyzeTimeline(timeline) {
       const abnormality = {
         type: ABNORMAL_TYPES.REPEATED,
         label: '重复点击',
-        description: `重复点击「${current.status}」状态`,
+        description: current.reason ? `重复点击「${current.status}」——${current.reason}` : `重复点击「${current.status}」状态`,
+        reason: current.reason || '',
         stepIndex: i,
         severity: 'warning'
       };
@@ -1132,7 +1153,8 @@ function analyzeTimeline(timeline) {
       const abnormality = {
         type: ABNORMAL_TYPES.REGRESSION,
         label: '状态倒退',
-        description: `从「${previous.status}」倒退至「${current.status}」`,
+        description: current.reason ? `从「${previous.status}」倒退至「${current.status}」——${current.reason}` : `从「${previous.status}」倒退至「${current.status}」`,
+        reason: current.reason || '',
         stepIndex: i,
         severity: 'error'
       };
@@ -1144,7 +1166,8 @@ function analyzeTimeline(timeline) {
       const abnormality = {
         type: ABNORMAL_TYPES.SKIP_CLEANING,
         label: '跳过清洁',
-        description: '从「透析中」直接变为「已完成」，跳过了「清洁中」',
+        description: current.reason ? `跳过「清洁中」——${current.reason}` : '从「透析中」直接变为「已完成」，跳过了「清洁中」',
+        reason: current.reason || '',
         stepIndex: i,
         severity: 'error'
       };
@@ -1435,6 +1458,9 @@ function App() {
   });
   const [selectedAuditRecord, setSelectedAuditRecord] = useState(null);
 
+  const [transitionConfirm, setTransitionConfirm] = useState(null);
+  const [transitionReason, setTransitionReason] = useState('');
+
   const [patientTrackView, setPatientTrackView] = useState(false);
   const [selectedPatient, setSelectedPatient] = useState(null);
   const [patientSearchQuery, setPatientSearchQuery] = useState('');
@@ -1447,6 +1473,21 @@ function App() {
   const [backupFatalError, setBackupFatalError] = useState('');
   const [backupMeta, setBackupMeta] = useState(null);
   const backupFileInputRef = useRef(null);
+
+  useEffect(() => {
+    function handleKeyDown(e) {
+      if (!transitionConfirm) return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        handleTransitionConfirmCancel();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        handleTransitionConfirmOk();
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [transitionConfirm, transitionReason]);
 
   function persist(next) {
     setRecords(next);
@@ -1856,14 +1897,42 @@ function App() {
     return generateBedRecommendations(target, records, violations);
   }, [form, records, editing, shouldShowRecommendations, formViolations]);
 
-  function updateStatus(id, status) {
+  function updateStatus(id, status, reason) {
     const next = records.map((item) => item.id === id ? {
       ...item,
       status,
-      timeline: [...(item.timeline || []), { status, at: today, by: '操作员' }]
+      timeline: [...(item.timeline || []), { status, at: today, by: '操作员', ...(reason ? { reason } : {}) }]
     } : item);
     persist(next);
     if (selected?.id === id) setSelected(next.find((item) => item.id === id));
+  }
+
+  function handleStatusClick(id, nextStatus) {
+    const record = records.find((item) => item.id === id);
+    if (!record) return;
+    const warnings = validateTransition(record.status, nextStatus);
+    if (warnings.length > 0) {
+      setTransitionConfirm({ id, nextStatus, currentStatus: record.status, warnings });
+      setTransitionReason('');
+    } else {
+      updateStatus(id, nextStatus);
+    }
+  }
+
+  function handleTransitionConfirmCancel() {
+    setTransitionConfirm(null);
+    setTransitionReason('');
+  }
+
+  function handleTransitionConfirmOk() {
+    if (!transitionConfirm) return;
+    if (!transitionReason.trim()) {
+      alert('请填写操作原因后再确认');
+      return;
+    }
+    updateStatus(transitionConfirm.id, transitionConfirm.nextStatus, transitionReason.trim());
+    setTransitionConfirm(null);
+    setTransitionReason('');
   }
 
   function removeRecord(id) {
@@ -2860,6 +2929,16 @@ function App() {
                           item.analyzedSteps.map((step, idx) => (
                             <div key={idx} className={'timeline-preview-step ' + (step.abnormalities.length > 0 ? 'abnormal' : '')}>
                               <span className={'step-status ' + statusClass(step.status)}>{step.status}</span>
+                              {step.abnormalities.length > 0 && (
+                                <span className="step-abnormal-labels">
+                                  {step.abnormalities.map((ab, abIdx) => (
+                                    <span key={abIdx} className={'preview-abnormal-tag ' + ab.type}>{ab.label}</span>
+                                  ))}
+                                </span>
+                              )}
+                              {step.reason && (
+                                <span className="preview-step-reason"><ClipboardList size={10} />{step.reason}</span>
+                              )}
                               {idx < item.analyzedSteps.length - 1 && (
                                 <ArrowRightLeft size={12} className="step-arrow" />
                               )}
@@ -2915,9 +2994,77 @@ function App() {
                       )}
                       <div className="actions" onClick={(event) => event.stopPropagation()}>
                         <button type="button" onClick={() => startEdit(item)}><Edit2 size={14} />编辑</button>
-                        {appConfig.statuses.map((status) => (
-                          <button key={status} type="button" onClick={() => updateStatus(item.id, status)}>{status}</button>
-                        ))}
+                        {(() => {
+                          const currentOrder = STATUS_ORDER[item.status] ?? -1;
+                          const nextStatus = appConfig.statuses[currentOrder + 1];
+                          const abnormalStatuses = appConfig.statuses.filter((status) => {
+                            const targetOrder = STATUS_ORDER[status] ?? -1;
+                            const isCurrent = status === item.status;
+                            const isRegression = targetOrder < currentOrder && currentOrder !== -1 && targetOrder !== -1;
+                            const isSkipCleaning = item.status === '透析中' && status === '已完成';
+                            return isCurrent || isRegression || isSkipCleaning;
+                          });
+                          const skipCleaningStatuses = appConfig.statuses.filter((status) =>
+                            item.status === '透析中' && status === '已完成'
+                          );
+                          const regressionStatuses = appConfig.statuses.filter((status) => {
+                            const targetOrder = STATUS_ORDER[status] ?? -1;
+                            return targetOrder < currentOrder && currentOrder !== -1 && targetOrder !== -1;
+                          });
+                          const repeatStatus = item.status;
+                          return (
+                            <>
+                              {nextStatus && (
+                                <button
+                                  type="button"
+                                  className="status-next"
+                                  onClick={() => handleStatusClick(item.id, nextStatus)}
+                                >{nextStatus} →</button>
+                              )}
+                              {!nextStatus && item.status === '已完成' && (
+                                <span className="status-done-tag"><CheckCircle2 size={14} />已完成</span>
+                              )}
+                              {abnormalStatuses.length > 0 && (
+                                <span className="abnormal-flow-group">
+                                  <button
+                                    type="button"
+                                    className="abnormal-flow-toggle"
+                                    onClick={(e) => {
+                                      const grp = e.currentTarget.parentElement;
+                                      grp.classList.toggle('expanded');
+                                    }}
+                                  ><AlertTriangle size={13} />异常流转</button>
+                                  <span className="abnormal-flow-options">
+                                    {regressionStatuses.map((status) => (
+                                      <button
+                                        key={status}
+                                        type="button"
+                                        className="status-caution status-regression"
+                                        onClick={() => handleStatusClick(item.id, status)}
+                                        title={`倒退至「${status}」，需填写原因`}
+                                      >↩ {status}</button>
+                                    ))}
+                                    {skipCleaningStatuses.map((status) => (
+                                      <button
+                                        key={status}
+                                        type="button"
+                                        className="status-caution status-skip"
+                                        onClick={() => handleStatusClick(item.id, status)}
+                                        title="跳过清洁环节，需填写原因"
+                                      >⚠ {status}(跳清洁)</button>
+                                    ))}
+                                    <button
+                                      type="button"
+                                      className="status-caution status-repeat"
+                                      onClick={() => handleStatusClick(item.id, repeatStatus)}
+                                      title="重复点击当前状态，需填写原因"
+                                    >⟳ 重置{repeatStatus}</button>
+                                  </span>
+                                </span>
+                              )}
+                            </>
+                          );
+                        })()}
                         {appConfig.action === 'copyRecipe' && <button type="button" onClick={() => duplicateRecord(item)}><RotateCcw size={14} />复制</button>}
                         {appConfig.chart && <button type="button" onClick={() => addTemperature(item)}>加温度</button>}
                         <button className="ghost-danger" type="button" onClick={() => removeRecord(item.id)}><Trash2 size={14} /></button>
@@ -3180,8 +3327,24 @@ function App() {
                   <div className="abnormal-list">
                     {selectedAuditRecord.abnormalities.map((ab, idx) => (
                       <div key={idx} className={'abnormal-item severity-' + ab.severity}>
-                        <span className="abnormal-type">{ab.label}</span>
-                        <span className="abnormal-desc">{ab.description}</span>
+                        <div className="abnormal-item-head">
+                          <span className="abnormal-type">{ab.label}</span>
+                          <span className="abnormal-desc">{ab.description}</span>
+                        </div>
+                        {ab.reason ? (
+                          <div className="abnormal-reason-block">
+                            <ClipboardList size={13} />
+                            <div>
+                              <span className="abnormal-reason-label">操作原因</span>
+                              <span className="abnormal-reason-text">{ab.reason}</span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="abnormal-reason-missing">
+                            <AlertCircle size={12} />
+                            <span>未填写原因（历史数据）</span>
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -3200,11 +3363,17 @@ function App() {
                   </div>
                 ) : (
                   selectedAuditRecord.analyzedSteps.map((step, index) => (
-                    <div key={index} className={'timeline-step ' + (step.abnormalities.length > 0 ? 'has-abnormality' : '')}>
+                    <div key={index} className={'timeline-step ' + (step.abnormalities.length > 0 ? 'has-abnormality' : '') + (step.reason ? ' has-reason' : '')}>
                       <div className="timeline-step-header">
                         <span className={'status ' + statusClass(step.status)}>{step.status}</span>
                         <span className="timeline-step-meta">{step.at} · {step.by}</span>
                       </div>
+                      {step.reason && (
+                        <div className="timeline-step-reason-detail">
+                          <ClipboardList size={12} />
+                          <span>操作原因：{step.reason}</span>
+                        </div>
+                      )}
                       {step.abnormalities.length > 0 && (
                         <div className="step-abnormalities">
                           {step.abnormalities.map((ab, abIdx) => (
@@ -3213,6 +3382,9 @@ function App() {
                               {ab.label}
                             </span>
                           ))}
+                          {!step.reason && (
+                            <span className="step-no-reason">无原因记录</span>
+                          )}
                         </div>
                       )}
                       {index < selectedAuditRecord.analyzedSteps.length - 1 && (
@@ -3293,9 +3465,40 @@ function App() {
                 </div>
               )}
               <div className="timeline">
-                {(selected.timeline || []).map((step, index) => (
-                  <span key={index}>{step.at} · {step.status} · {step.by}</span>
-                ))}
+                {(() => {
+                  const { steps: analyzedSteps } = analyzeTimeline(selected.timeline);
+                  return (selected.timeline || []).map((step, index) => {
+                    const analyzed = analyzedSteps[index];
+                    const hasAbnormal = analyzed && analyzed.abnormalities && analyzed.abnormalities.length > 0;
+                    return (
+                      <div key={index} className={'timeline-item' + (hasAbnormal ? ' has-abnormal' : '')}>
+                        <span className="timeline-item-main">
+                          <span className={'status ' + statusClass(step.status)}>{step.status}</span>
+                          <span className="timeline-item-meta">{step.at} · {step.by}</span>
+                        </span>
+                        {hasAbnormal && (
+                          <span className="timeline-item-abnormal-tags">
+                            {analyzed.abnormalities.map((ab, abIdx) => (
+                              <span key={abIdx} className={'item-abnormal-tag ' + ab.type}>{ab.label}</span>
+                            ))}
+                          </span>
+                        )}
+                        {step.reason && (
+                          <span className="timeline-item-reason">
+                            <ClipboardList size={10} />
+                            {step.reason}
+                          </span>
+                        )}
+                        {hasAbnormal && !step.reason && (
+                          <span className="timeline-item-no-reason">
+                            <AlertCircle size={10} />
+                            无原因记录
+                          </span>
+                        )}
+                      </div>
+                    );
+                  });
+                })()}
               </div>
             </div>
           ) : (
@@ -3723,6 +3926,59 @@ function App() {
                 title={backupStats.invalid > 0 ? '存在无效记录，无法恢复' : ''}
               >
                 <Save size={16} />确认恢复并覆盖 {backupValidRecords.length} 条
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {transitionConfirm && (
+        <div className="modal-overlay" onClick={handleTransitionConfirmCancel}>
+          <div className="modal transition-confirm-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="panel-title">
+                <AlertTriangle size={18} />
+                <h2>状态流转确认</h2>
+              </div>
+              <button type="button" className="icon-btn" onClick={handleTransitionConfirmCancel}><X size={18} /></button>
+            </div>
+            <div className="modal-body">
+              <div className="transition-confirm-info">
+                <p className="transition-confirm-flow">
+                  <span className={'status ' + statusClass(transitionConfirm.currentStatus)}>{transitionConfirm.currentStatus}</span>
+                  <ArrowRightLeft size={16} />
+                  <span className={'status ' + statusClass(transitionConfirm.nextStatus)}>{transitionConfirm.nextStatus}</span>
+                </p>
+                <p className="transition-confirm-hint">正常流转顺序：待到达 → 透析中 → 清洁中 → 已完成</p>
+              </div>
+              <div className="transition-confirm-warnings">
+                {transitionConfirm.warnings.map((w, idx) => (
+                  <div key={idx} className={'transition-warning-item severity-' + (w.type === ABNORMAL_TYPES.REPEATED ? 'warning' : 'error')}>
+                    <AlertTriangle size={14} />
+                    <div>
+                      <strong>{w.label}</strong>
+                      <p>{w.description}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="transition-confirm-reason">
+                <label>
+                  <span>操作原因 <em>*</em></span>
+                  <textarea
+                    value={transitionReason}
+                    onChange={(e) => setTransitionReason(e.target.value)}
+                    placeholder="请填写本次异常流转的原因（必填）"
+                    rows={3}
+                    autoFocus
+                  />
+                </label>
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="secondary" onClick={handleTransitionConfirmCancel}>取消</button>
+              <button type="button" className="primary" onClick={handleTransitionConfirmOk} disabled={!transitionReason.trim()}>
+                <CheckCircle2 size={16} />确认流转
               </button>
             </div>
           </div>
