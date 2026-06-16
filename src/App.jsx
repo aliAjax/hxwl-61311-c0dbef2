@@ -370,6 +370,157 @@ const BACKUP_META = { appId: appConfig.id, domain: appConfig.domain };
 
 const REQUIRED_FIELDS = ['patient', 'date', 'shift', 'bed', 'start', 'end'];
 
+const PATIENT_TEMPLATE_STORAGE = `${appConfig.storage}-patient-templates`;
+const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+const DURATION_OPTIONS = [120, 180, 240, 300, 360];
+
+function loadPatientTemplates() {
+  const raw = localStorage.getItem(PATIENT_TEMPLATE_STORAGE);
+  if (raw) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function savePatientTemplates(templates) {
+  localStorage.setItem(PATIENT_TEMPLATE_STORAGE, JSON.stringify(templates));
+}
+
+function getDefaultTimesByShift(shift, durationMinutes) {
+  const shiftDefaults = {
+    '上午': { start: '08:00', end: '12:00' },
+    '下午': { start: '13:00', end: '17:00' },
+    '夜间': { start: '19:00', end: '23:00' }
+  };
+  const base = shiftDefaults[shift] || shiftDefaults['上午'];
+  const startMin = timeToMinutes(base.start);
+  const endMin = startMin + durationMinutes;
+  return {
+    start: base.start,
+    end: minutesToTime(endMin)
+  };
+}
+
+function analyzeTemplateDifferences(patientRecords, template) {
+  if (!template || !patientRecords || patientRecords.length === 0) {
+    return { dateMismatches: [], bedChanges: [], totalMismatches: 0, totalBedChanges: 0 };
+  }
+
+  const dateMismatches = [];
+  const bedChanges = [];
+  const templateDays = new Set(template.weeklyDays || []);
+
+  for (let i = 0; i < patientRecords.length; i++) {
+    const record = patientRecords[i];
+    const date = new Date(record.date);
+    const dayOfWeek = date.getDay();
+    const isScheduledDay = templateDays.has(dayOfWeek);
+
+    if (!isScheduledDay && templateDays.size > 0) {
+      dateMismatches.push({
+        date: record.date,
+        expected: WEEKDAYS.filter((_, idx) => templateDays.has(idx)).join('、'),
+        actual: WEEKDAYS[dayOfWeek],
+        record
+      });
+    }
+
+    if (record.shift !== template.defaultShift) {
+      dateMismatches.push({
+        date: record.date,
+        type: 'shift',
+        expected: template.defaultShift,
+        actual: record.shift,
+        record
+      });
+    }
+
+    if (record.bed !== template.defaultBed) {
+      const prevBed = i > 0 ? patientRecords[i - 1].bed : null;
+      bedChanges.push({
+        date: record.date,
+        from: prevBed || '模板默认',
+        to: record.bed,
+        expected: template.defaultBed,
+        record
+      });
+    }
+
+    if (template.durationMinutes) {
+      const recordDuration = timeToMinutes(record.end) - timeToMinutes(record.start);
+      if (recordDuration !== template.durationMinutes) {
+        dateMismatches.push({
+          date: record.date,
+          type: 'duration',
+          expected: `${Math.floor(template.durationMinutes / 60)}小时${template.durationMinutes % 60}分钟`,
+          actual: `${Math.floor(recordDuration / 60)}小时${recordDuration % 60}分钟`,
+          record
+        });
+      }
+    }
+  }
+
+  return {
+    dateMismatches,
+    bedChanges,
+    totalMismatches: dateMismatches.length,
+    totalBedChanges: bedChanges.length
+  };
+}
+
+function hasPatientTemplate(patientName, templates) {
+  return !!templates?.[patientName];
+}
+
+function getPatientTemplateSuggestion(patientName, templates, targetDate) {
+  const template = templates?.[patientName];
+  if (!template) return null;
+
+  const { start, end } = getDefaultTimesByShift(template.defaultShift, template.durationMinutes || 240);
+  
+  let suggestedDate = targetDate || '';
+  if (targetDate && template.weeklyDays && template.weeklyDays.length > 0) {
+    const date = new Date(targetDate);
+    const currentDay = date.getDay();
+    const sortedDays = [...template.weeklyDays].sort();
+    
+    if (!sortedDays.includes(currentDay)) {
+      let daysToAdd = 0;
+      for (const day of sortedDays) {
+        if (day > currentDay) {
+          daysToAdd = day - currentDay;
+          break;
+        }
+      }
+      if (daysToAdd === 0) {
+        daysToAdd = (7 - currentDay + sortedDays[0]) % 7;
+      }
+      if (daysToAdd > 0) {
+        date.setDate(date.getDate() + daysToAdd);
+        suggestedDate = getLocalDateStringFromDate(date);
+      }
+    }
+  }
+
+  return {
+    shift: template.defaultShift,
+    bed: template.defaultBed,
+    start,
+    end,
+    durationMinutes: template.durationMinutes || 240,
+    weeklyDays: template.weeklyDays || [],
+    suggestedDate
+  };
+}
+
+function getLocalDateStringFromDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 function exportBackup(records) {
   const payload = {
     version: BACKUP_VERSION,
@@ -1467,6 +1618,17 @@ function App() {
   const [selectedPatient, setSelectedPatient] = useState(null);
   const [patientSearchQuery, setPatientSearchQuery] = useState('');
 
+  const [patientTemplates, setPatientTemplates] = useState(loadPatientTemplates);
+  const [editingTemplate, setEditingTemplate] = useState(null);
+  const [templateForm, setTemplateForm] = useState({
+    defaultShift: '上午',
+    defaultBed: 'B01',
+    durationMinutes: 240,
+    weeklyDays: []
+  });
+  const [showTemplateSuggestion, setShowTemplateSuggestion] = useState(false);
+  const [lastTemplatePatient, setLastTemplatePatient] = useState('');
+
   const [backupOpen, setBackupOpen] = useState(false);
   const [backupFileName, setBackupFileName] = useState('');
   const [backupValidationResults, setBackupValidationResults] = useState([]);
@@ -1494,6 +1656,97 @@ function App() {
   function persist(next) {
     setRecords(next);
     localStorage.setItem(appConfig.storage, JSON.stringify(next));
+  }
+
+  function persistTemplates(next) {
+    setPatientTemplates(next);
+    savePatientTemplates(next);
+  }
+
+  function handlePatientChange(patientName) {
+    setForm(prev => ({ ...prev, patient: patientName }));
+    setLastTemplatePatient(patientName);
+    
+    if (patientName && patientTemplates[patientName]) {
+      const suggestion = getPatientTemplateSuggestion(patientName, patientTemplates, form.date || today);
+      if (suggestion) {
+        setShowTemplateSuggestion(true);
+        setForm(prev => ({
+          ...prev,
+          patient: patientName,
+          shift: suggestion.shift,
+          bed: suggestion.bed,
+          start: suggestion.start,
+          end: suggestion.end,
+          date: suggestion.suggestedDate || prev.date
+        }));
+        setTimeout(() => setShowTemplateSuggestion(false), 2000);
+      }
+    }
+  }
+
+  function startEditTemplate(patientName) {
+    const existing = patientTemplates[patientName];
+    if (existing) {
+      setTemplateForm({
+        defaultShift: existing.defaultShift || '上午',
+        defaultBed: existing.defaultBed || 'B01',
+        durationMinutes: existing.durationMinutes || 240,
+        weeklyDays: existing.weeklyDays || []
+      });
+    } else {
+      setTemplateForm({
+        defaultShift: '上午',
+        defaultBed: 'B01',
+        durationMinutes: 240,
+        weeklyDays: []
+      });
+    }
+    setEditingTemplate(patientName);
+  }
+
+  function cancelEditTemplate() {
+    setEditingTemplate(null);
+    setTemplateForm({
+      defaultShift: '上午',
+      defaultBed: 'B01',
+      durationMinutes: 240,
+      weeklyDays: []
+    });
+  }
+
+  function saveTemplate() {
+    if (!editingTemplate) return;
+    
+    const nextTemplates = {
+      ...patientTemplates,
+      [editingTemplate]: {
+        ...templateForm,
+        updatedAt: new Date().toISOString()
+      }
+    };
+    persistTemplates(nextTemplates);
+    cancelEditTemplate();
+  }
+
+  function deleteTemplate(patientName) {
+    if (confirm(`确定要删除「${patientName}」的固定排班模板吗？`)) {
+      const nextTemplates = { ...patientTemplates };
+      delete nextTemplates[patientName];
+      persistTemplates(nextTemplates);
+      if (editingTemplate === patientName) {
+        cancelEditTemplate();
+      }
+    }
+  }
+
+  function toggleWeeklyDay(dayIndex) {
+    setTemplateForm(prev => {
+      const days = prev.weeklyDays.includes(dayIndex)
+        ? prev.weeklyDays.filter(d => d !== dayIndex)
+        : [...prev.weeklyDays, dayIndex];
+      return { ...prev, weeklyDays: days };
+    });
   }
 
   function handleImportOpen() {
@@ -2507,7 +2760,28 @@ function App() {
               {appConfig.fields.map((field) => (
                 <label key={field.key} className={field.type === 'textarea' ? 'wide' : ''}>
                   <span>{field.label}</span>
-                  {field.type === 'textarea' ? (
+                  {field.key === 'patient' ? (
+                    <div className="patient-select-wrapper">
+                      <select 
+                        value={form[field.key] || ''} 
+                        onChange={(event) => handlePatientChange(event.target.value)}
+                        className="patient-select"
+                      >
+                        <option value="">选择患者</option>
+                        {patientGroups.map((g) => (
+                          <option key={g.name} value={g.name}>
+                            {g.name} {hasPatientTemplate(g.name, patientTemplates) ? '✓' : ''}
+                          </option>
+                        ))}
+                      </select>
+                      {showTemplateSuggestion && form.patient && (
+                        <span className="template-suggestion-badge">
+                          <Sparkles size={12} />
+                          已根据模板自动填充
+                        </span>
+                      )}
+                    </div>
+                  ) : field.type === 'textarea' ? (
                     <textarea value={form[field.key] || ''} onChange={(event) => setForm({ ...form, [field.key]: event.target.value })} placeholder={field.placeholder} />
                   ) : field.type === 'select' ? (
                     <select value={form[field.key] || ''} onChange={(event) => setForm({ ...form, [field.key]: event.target.value })}>
@@ -2785,6 +3059,202 @@ function App() {
                     </div>
                   )}
 
+                  <div className="patient-template-section">
+                    <div className="patient-section-header">
+                      <h4 className="patient-section-title">
+                        <CalendarDays size={16} />
+                        固定排班模板
+                        {patientTemplates[selectedPatient] && (
+                          <span className="template-badge active">已设置</span>
+                        )}
+                      </h4>
+                      {!editingTemplate && (
+                        <button 
+                          type="button" 
+                          className="edit-template-btn"
+                          onClick={() => startEditTemplate(selectedPatient)}
+                        >
+                          <Edit2 size={14} />
+                          {patientTemplates[selectedPatient] ? '编辑模板' : '设置模板'}
+                        </button>
+                      )}
+                    </div>
+
+                    {editingTemplate === selectedPatient ? (
+                      <div className="template-edit-form">
+                        <div className="template-form-grid">
+                          <label>
+                            <span>常用班次</span>
+                            <select 
+                              value={templateForm.defaultShift}
+                              onChange={(e) => setTemplateForm(prev => ({ ...prev, defaultShift: e.target.value }))}
+                            >
+                              {['上午', '下午', '夜间'].map(shift => (
+                                <option key={shift} value={shift}>{shift}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            <span>常用床位</span>
+                            <select 
+                              value={templateForm.defaultBed}
+                              onChange={(e) => setTemplateForm(prev => ({ ...prev, defaultBed: e.target.value }))}
+                            >
+                              {filterOptions.beds.map(bed => (
+                                <option key={bed} value={bed}>{bed}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            <span>预计时长</span>
+                            <select 
+                              value={templateForm.durationMinutes}
+                              onChange={(e) => setTemplateForm(prev => ({ ...prev, durationMinutes: Number(e.target.value) }))}
+                            >
+                              {DURATION_OPTIONS.map(min => (
+                                <option key={min} value={min}>
+                                  {Math.floor(min / 60)}小时{min % 60 > 0 ? `${min % 60}分钟` : ''}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                        <div className="template-weekdays">
+                          <span className="template-label">每周透析日</span>
+                          <div className="weekday-buttons">
+                            {WEEKDAYS.map((day, idx) => (
+                              <button
+                                key={idx}
+                                type="button"
+                                className={'weekday-btn ' + (templateForm.weeklyDays.includes(idx) ? 'active' : '')}
+                                onClick={() => toggleWeeklyDay(idx)}
+                              >
+                                {day}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="template-form-actions">
+                          <button type="button" className="primary" onClick={saveTemplate}>
+                            <Save size={14} />保存模板
+                          </button>
+                          <button type="button" className="secondary" onClick={cancelEditTemplate}>
+                            <X size={14} />取消
+                          </button>
+                          {patientTemplates[selectedPatient] && (
+                            <button 
+                              type="button" 
+                              className="ghost-danger"
+                              onClick={() => deleteTemplate(selectedPatient)}
+                            >
+                              <Trash2 size={14} />删除模板
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ) : patientTemplates[selectedPatient] ? (
+                      <div className="template-display">
+                        <div className="template-info-grid">
+                          <div className="template-info-item">
+                            <span className="template-info-label">常用班次</span>
+                            <span className="template-info-value">{patientTemplates[selectedPatient].defaultShift}</span>
+                          </div>
+                          <div className="template-info-item">
+                            <span className="template-info-label">常用床位</span>
+                            <span className="template-info-value bed">{patientTemplates[selectedPatient].defaultBed}</span>
+                          </div>
+                          <div className="template-info-item">
+                            <span className="template-info-label">预计时长</span>
+                            <span className="template-info-value">
+                              {Math.floor(patientTemplates[selectedPatient].durationMinutes / 60)}小时
+                              {patientTemplates[selectedPatient].durationMinutes % 60 > 0 
+                                ? `${patientTemplates[selectedPatient].durationMinutes % 60}分钟` 
+                                : ''}
+                            </span>
+                          </div>
+                          <div className="template-info-item">
+                            <span className="template-info-label">每周透析日</span>
+                            <span className="template-info-value">
+                              {patientTemplates[selectedPatient].weeklyDays && patientTemplates[selectedPatient].weeklyDays.length > 0
+                                ? patientTemplates[selectedPatient].weeklyDays.sort().map(d => WEEKDAYS[d]).join('、')
+                                : '未设置'}
+                            </span>
+                          </div>
+                        </div>
+                        {(() => {
+                          const diff = analyzeTemplateDifferences(selectedPatientDetail.records, patientTemplates[selectedPatient]);
+                          return (
+                            <div className="template-diff-summary">
+                              <div className={'diff-summary-item ' + (diff.totalMismatches > 0 ? 'has-diff' : '')}>
+                                <AlertTriangle size={14} />
+                                <span>与模板不一致：{diff.totalMismatches} 处</span>
+                              </div>
+                              <div className={'diff-summary-item ' + (diff.totalBedChanges > 0 ? 'has-diff' : '')}>
+                                <ArrowRightLeft size={14} />
+                                <span>床位变化：{diff.totalBedChanges} 次</span>
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    ) : (
+                      <p className="empty-template">
+                        尚未设置固定排班模板。设置后新增记录时将自动带出建议值。
+                      </p>
+                    )}
+                  </div>
+
+                  {(() => {
+                    const template = patientTemplates[selectedPatient];
+                    if (!template) return null;
+                    const diff = analyzeTemplateDifferences(selectedPatientDetail.records, template);
+                    if (diff.totalMismatches === 0 && diff.totalBedChanges === 0) return null;
+                    return (
+                      <div className="patient-template-diff-section">
+                        <h4 className="patient-section-title">
+                          <AlertTriangle size={16} />
+                          与模板安排不一致
+                        </h4>
+                        {diff.dateMismatches.length > 0 && (
+                          <div className="diff-list">
+                            <h5 className="diff-subtitle">日期/班次/时长不一致</h5>
+                            {diff.dateMismatches.slice(0, 10).map((m, idx) => (
+                              <div key={idx} className="diff-item" onClick={() => setSelected(m.record)}>
+                                <span className="diff-date">{m.date}</span>
+                                <span className="diff-type">
+                                  {m.type === 'shift' ? '班次' : m.type === 'duration' ? '时长' : '日期'}
+                                </span>
+                                <span className="diff-expected">预期：{m.expected}</span>
+                                <ArrowRightLeft size={12} className="diff-arrow" />
+                                <span className="diff-actual">实际：{m.actual}</span>
+                              </div>
+                            ))}
+                            {diff.dateMismatches.length > 10 && (
+                              <p className="diff-more">还有 {diff.dateMismatches.length - 10} 条不一致记录...</p>
+                            )}
+                          </div>
+                        )}
+                        {diff.bedChanges.length > 0 && (
+                          <div className="diff-list">
+                            <h5 className="diff-subtitle">床位变化记录</h5>
+                            {diff.bedChanges.slice(0, 10).map((c, idx) => (
+                              <div key={idx} className="diff-item bed-diff" onClick={() => setSelected(c.record)}>
+                                <span className="diff-date">{c.date}</span>
+                                <span className="bed-change-from">{c.from}</span>
+                                <ArrowRightLeft size={12} className="diff-arrow" />
+                                <span className="bed-change-to">{c.to}</span>
+                                <span className="bed-expected">(预期：{c.expected})</span>
+                              </div>
+                            ))}
+                            {diff.bedChanges.length > 10 && (
+                              <p className="diff-more">还有 {diff.bedChanges.length - 10} 条床位变化记录...</p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
                   {selectedPatientDetail.bedChanges.length > 0 && (
                     <div className="patient-bed-changes-section">
                       <h4 className="patient-section-title"><ArrowRightLeft size={16} />床位变化</h4>
@@ -2825,25 +3295,94 @@ function App() {
                   <div className="patient-timeline-section">
                     <h4 className="patient-section-title"><History size={16} />透析时间线</h4>
                     <div className="patient-timeline-list">
-                      {selectedPatientDetail.records.map((item, idx) => (
-                        <div key={item.id} className="patient-timeline-item" onClick={() => setSelected(item)}>
-                          <div className="patient-timeline-dot-wrapper">
-                            <div className={'patient-timeline-dot ' + statusClass(item.status)}></div>
-                            {idx < selectedPatientDetail.records.length - 1 && <div className="patient-timeline-line"></div>}
-                          </div>
-                          <div className="patient-timeline-content">
-                            <div className="patient-timeline-head">
-                              <span className="patient-timeline-date">{item.date}</span>
-                              <span className="patient-timeline-shift">{item.shift}</span>
-                              <span className={'status ' + statusClass(item.status)}>{item.status}</span>
+                      {(() => {
+                        const template = patientTemplates[selectedPatient];
+                        return selectedPatientDetail.records.map((item, idx) => {
+                          const prevItem = idx > 0 ? selectedPatientDetail.records[idx - 1] : null;
+                          let hasTemplateDiff = false;
+                          let diffTypes = [];
+                          let bedChangedFromPrev = false;
+                          let bedChangeFrom = '';
+                          
+                          if (template) {
+                            const dateObj = new Date(item.date);
+                            const dayOfWeek = dateObj.getDay();
+                            const actualDuration = calculateDuration(item.start, item.end);
+                            
+                            if (template.weeklyDays && template.weeklyDays.length > 0 && !template.weeklyDays.includes(dayOfWeek)) {
+                              hasTemplateDiff = true;
+                              diffTypes.push('日期');
+                            }
+                            if (template.defaultShift && item.shift !== template.defaultShift) {
+                              hasTemplateDiff = true;
+                              diffTypes.push('班次');
+                            }
+                            if (template.defaultBed && item.bed !== template.defaultBed) {
+                              hasTemplateDiff = true;
+                              diffTypes.push('床位');
+                            }
+                            if (template.durationMinutes && Math.abs(actualDuration - template.durationMinutes) > 5) {
+                              hasTemplateDiff = true;
+                              diffTypes.push('时长');
+                            }
+                          }
+                          
+                          if (prevItem && item.bed !== prevItem.bed) {
+                            bedChangedFromPrev = true;
+                            bedChangeFrom = prevItem.bed;
+                          }
+                          
+                          return (
+                            <div key={item.id} className={'patient-timeline-item ' + (hasTemplateDiff ? 'has-diff' : '') + (bedChangedFromPrev ? ' bed-changed' : '')} onClick={() => setSelected(item)}>
+                              <div className="patient-timeline-dot-wrapper">
+                                <div className={'patient-timeline-dot ' + statusClass(item.status)}></div>
+                                {idx < selectedPatientDetail.records.length - 1 && <div className="patient-timeline-line"></div>}
+                              </div>
+                              <div className="patient-timeline-content">
+                                <div className="patient-timeline-head">
+                                  <span className="patient-timeline-date">{item.date}</span>
+                                  <span className="patient-timeline-shift">
+                                    {item.shift}
+                                    {template && template.defaultShift && item.shift !== template.defaultShift && (
+                                      <span className="diff-expected-inline">({template.defaultShift})</span>
+                                    )}
+                                  </span>
+                                  <span className={'status ' + statusClass(item.status)}>{item.status}</span>
+                                  {hasTemplateDiff && (
+                                    <span className="timeline-diff-badge" title={`与模板不一致：${diffTypes.join('、')}`}>
+                                      <AlertTriangle size={12} />
+                                      {diffTypes.join('、')}
+                                    </span>
+                                  )}
+                                  {bedChangedFromPrev && (
+                                    <span className="timeline-bed-badge" title="床位变化">
+                                      <ArrowRightLeft size={12} />
+                                      {bedChangeFrom} → {item.bed}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="patient-timeline-meta">
+                                  <span className="patient-timeline-bed">
+                                    <Bed size={12} />
+                                    {item.bed}
+                                    {template && template.defaultBed && item.bed !== template.defaultBed && (
+                                      <span className="diff-expected-inline">({template.defaultBed})</span>
+                                    )}
+                                  </span>
+                                  <span className="patient-timeline-time">
+                                    {item.start}-{item.end}
+                                    {template && template.durationMinutes && Math.abs(calculateDuration(item.start, item.end) - template.durationMinutes) > 5 && (
+                                      <span className="diff-expected-inline">
+                                        ({Math.floor(template.durationMinutes / 60)}h{template.durationMinutes % 60 > 0 ? template.durationMinutes % 60 + 'm' : ''})
+                                      </span>
+                                    )}
+                                  </span>
+                                </div>
+                              </div>
                             </div>
-                            <div className="patient-timeline-meta">
-                              <span className="patient-timeline-bed"><Bed size={12} />{item.bed}</span>
-                              <span className="patient-timeline-time">{item.start}-{item.end}</span>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
+                          );
+                        });
+                      })()}
                     </div>
                   </div>
                 </div>
