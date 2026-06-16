@@ -2061,6 +2061,14 @@ button.status-repeat:hover {
   border-radius: 3px;
 }
 
+.edit-status-hint {
+  font-size: 10px;
+  color: #9ca3af;
+  font-weight: 400;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
 @media (max-width: 980px) {
   .audit-stats {
     grid-template-columns: repeat(3, minmax(0, 1fr));

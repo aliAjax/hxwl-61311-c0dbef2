@@ -1460,6 +1460,8 @@ function App() {
 
   const [transitionConfirm, setTransitionConfirm] = useState(null);
   const [transitionReason, setTransitionReason] = useState('');
+  const [transitionSource, setTransitionSource] = useState('button'); // 'button' | 'edit'
+  const [editPendingSave, setEditPendingSave] = useState(null); // 编辑时待保存的表单数据
 
   const [patientTrackView, setPatientTrackView] = useState(false);
   const [selectedPatient, setSelectedPatient] = useState(null);
@@ -1770,17 +1772,39 @@ function App() {
     }
 
     if (editing) {
+      const oldStatus = editing.status;
+      const newStatus = form.status || editing.status;
+      const statusChanged = oldStatus !== newStatus;
+
+      if (statusChanged) {
+        const warnings = validateTransition(oldStatus, newStatus);
+        if (warnings.length > 0) {
+          setTransitionSource('edit');
+          setEditPendingSave({ form: { ...form }, editingId: editing.id });
+          setTransitionConfirm({
+            id: editing.id,
+            nextStatus: newStatus,
+            currentStatus: oldStatus,
+            warnings,
+            fromEdit: true
+          });
+          setTransitionReason('');
+          return;
+        }
+      }
+
       const updated = records.map((item) => item.id === editing.id ? {
         ...item,
         ...form,
-        status: form.status || item.status,
-        timeline: [...(item.timeline || []), { status: form.status || item.status, at: today, by: '编辑' }]
+        status: newStatus,
+        timeline: [...(item.timeline || []), { status: newStatus, at: today, by: '编辑', ...(statusChanged && transitionReason.trim() ? { reason: transitionReason.trim() } : {}) }]
       } : item);
       persist(updated);
       const edited = updated.find((r) => r.id === editing.id);
       setSelected(edited);
       setEditing(null);
       setForm(appConfig.defaultValues);
+      setTransitionReason('');
     } else {
       const nextRecord = {
         id: uid(),
@@ -1912,7 +1936,8 @@ function App() {
     if (!record) return;
     const warnings = validateTransition(record.status, nextStatus);
     if (warnings.length > 0) {
-      setTransitionConfirm({ id, nextStatus, currentStatus: record.status, warnings });
+      setTransitionSource('button');
+      setTransitionConfirm({ id, nextStatus, currentStatus: record.status, warnings, fromEdit: false });
       setTransitionReason('');
     } else {
       updateStatus(id, nextStatus);
@@ -1920,6 +1945,34 @@ function App() {
   }
 
   function handleTransitionConfirmCancel() {
+    setTransitionConfirm(null);
+    setTransitionReason('');
+    setEditPendingSave(null);
+  }
+
+  function handleEditConfirmSave(reason) {
+    if (!editPendingSave) return;
+    const { form: pendingForm, editingId } = editPendingSave;
+    const newStatus = pendingForm.status || editing.status;
+    const statusChanged = editing.status !== newStatus;
+
+    const updated = records.map((item) => item.id === editingId ? {
+      ...item,
+      ...pendingForm,
+      status: newStatus,
+      timeline: [...(item.timeline || []), {
+        status: newStatus,
+        at: today,
+        by: '编辑',
+        ...(statusChanged && reason ? { reason } : {})
+      }]
+    } : item);
+    persist(updated);
+    const edited = updated.find((r) => r.id === editingId);
+    setSelected(edited);
+    setEditing(null);
+    setForm(appConfig.defaultValues);
+    setEditPendingSave(null);
     setTransitionConfirm(null);
     setTransitionReason('');
   }
@@ -1930,9 +1983,14 @@ function App() {
       alert('请填写操作原因后再确认');
       return;
     }
-    updateStatus(transitionConfirm.id, transitionConfirm.nextStatus, transitionReason.trim());
-    setTransitionConfirm(null);
-    setTransitionReason('');
+
+    if (transitionSource === 'edit') {
+      handleEditConfirmSave(transitionReason.trim());
+    } else {
+      updateStatus(transitionConfirm.id, transitionConfirm.nextStatus, transitionReason.trim());
+      setTransitionConfirm(null);
+      setTransitionReason('');
+    }
   }
 
   function removeRecord(id) {
@@ -2461,9 +2519,35 @@ function App() {
                 </label>
               ))}
               <label>
-                <span>当前状态</span>
+                <span>
+                  当前状态
+                  {editing && (
+                    <span className="edit-status-hint">
+                      （正常顺序：待到达 → 透析中 → 清洁中 → 已完成）
+                    </span>
+                  )}
+                </span>
                 <select value={form.status || appConfig.primaryStatus} onChange={(event) => setForm({ ...form, status: event.target.value })}>
-                  {appConfig.statuses.map((status) => <option key={status}>{status}</option>)}
+                  {appConfig.statuses.map((status) => {
+                    if (!editing) {
+                      return <option key={status}>{status}</option>;
+                    }
+                    const currentOrder = STATUS_ORDER[editing.status] ?? -1;
+                    const targetOrder = STATUS_ORDER[status] ?? -1;
+                    const isNext = targetOrder === currentOrder + 1;
+                    const isCurrent = status === editing.status;
+                    const isRegression = targetOrder < currentOrder && currentOrder !== -1 && targetOrder !== -1;
+                    const isSkipCleaning = editing.status === '透析中' && status === '已完成';
+                    const isAbnormal = isCurrent || isRegression || isSkipCleaning;
+
+                    let label = status;
+                    if (isNext) label = status + '  ✓ 下一步';
+                    else if (isRegression) label = status + '  ⚠ 倒退';
+                    else if (isSkipCleaning) label = status + '  ⚠ 跳过清洁';
+                    else if (isCurrent) label = status + '  ○ 当前';
+
+                    return <option key={status}>{label}</option>;
+                  })}
                 </select>
               </label>
             </div>
@@ -3938,7 +4022,7 @@ function App() {
             <div className="modal-header">
               <div className="panel-title">
                 <AlertTriangle size={18} />
-                <h2>状态流转确认</h2>
+                <h2>{transitionConfirm.fromEdit ? '编辑状态流转确认' : '状态流转确认'}</h2>
               </div>
               <button type="button" className="icon-btn" onClick={handleTransitionConfirmCancel}><X size={18} /></button>
             </div>
@@ -3949,7 +4033,11 @@ function App() {
                   <ArrowRightLeft size={16} />
                   <span className={'status ' + statusClass(transitionConfirm.nextStatus)}>{transitionConfirm.nextStatus}</span>
                 </p>
-                <p className="transition-confirm-hint">正常流转顺序：待到达 → 透析中 → 清洁中 → 已完成</p>
+                {transitionConfirm.fromEdit ? (
+                  <p className="transition-confirm-hint">通过编辑表单修改状态，正常流转顺序：待到达 → 透析中 → 清洁中 → 已完成</p>
+                ) : (
+                  <p className="transition-confirm-hint">正常流转顺序：待到达 → 透析中 → 清洁中 → 已完成</p>
+                )}
               </div>
               <div className="transition-confirm-warnings">
                 {transitionConfirm.warnings.map((w, idx) => (
@@ -3978,7 +4066,7 @@ function App() {
             <div className="modal-footer">
               <button type="button" className="secondary" onClick={handleTransitionConfirmCancel}>取消</button>
               <button type="button" className="primary" onClick={handleTransitionConfirmOk} disabled={!transitionReason.trim()}>
-                <CheckCircle2 size={16} />确认流转
+                <CheckCircle2 size={16} />{transitionConfirm.fromEdit ? '保存并确认' : '确认流转'}
               </button>
             </div>
           </div>
